@@ -1,0 +1,430 @@
+"""Ollama brain implementation using local LLM.
+
+This brain uses Ollama to run local LLMs for answering questions
+and evaluating permission requests without external API calls.
+
+Requires the ollama package and a running Ollama server:
+    pip install ollama
+    # or
+    pip install perpetualcc[ollama]
+
+    # Start Ollama server
+    ollama serve
+
+    # Pull a model
+    ollama pull llama3.2
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from perpetualcc.brain.base import (
+    Brain,
+    BrainAnswer,
+    PermissionContext,
+    PermissionDecision,
+    QuestionContext,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# System prompts for the Ollama brain (same as Gemini for consistency)
+QUESTION_SYSTEM_PROMPT = """You are an intelligent assistant helping to answer questions during a Claude Code session.
+
+Your role is to:
+1. Answer routine questions that a senior developer would typically answer
+2. Make sensible default choices when asked about options
+3. Escalate to human when uncertain or when the question involves significant decisions
+
+Guidelines:
+- For "proceed/continue?" questions, answer "Yes" if the context seems normal
+- For technical choices, prefer widely-used, well-supported options
+- For questions about project conventions, infer from the context if possible
+- If the question involves sensitive operations (credentials, production, payments), escalate
+- If you're uncertain about the correct answer, escalate to human
+
+Your response MUST be in this exact format:
+ANSWER: <your answer or selected option>
+CONFIDENCE: <0.0 to 1.0>
+REASONING: <brief explanation>
+
+If you think a human should decide, respond with:
+ANSWER: ESCALATE
+CONFIDENCE: 0.0
+REASONING: <why this needs human input>"""
+
+PERMISSION_SYSTEM_PROMPT = """You are evaluating whether to approve a tool use request during a Claude Code session.
+
+Context: This is a medium-risk operation that needs intelligent evaluation.
+
+Your role is to:
+1. Approve operations that are safe and align with normal development workflows
+2. Deny operations that could be harmful or risky
+3. Escalate to human when uncertain
+
+Consider:
+- Is this a common development operation?
+- Could this cause data loss or security issues?
+- Does the file/command target sensitive areas?
+- Is this consistent with the current task?
+
+Your response MUST be in this exact format:
+DECISION: APPROVE | DENY | ESCALATE
+CONFIDENCE: <0.0 to 1.0>
+REASONING: <brief explanation>"""
+
+
+class OllamaBrain(Brain):
+    """Brain implementation using local LLM via Ollama.
+
+    Uses Ollama to run local models for context-aware question answering
+    and permission evaluation without external API dependencies.
+    """
+
+    def __init__(
+        self,
+        host: str = "http://localhost:11434",
+        model: str = "llama3.2",
+        confidence_threshold: float = 0.7,
+        timeout: int = 120,
+    ):
+        """Initialize the Ollama brain.
+
+        Args:
+            host: Ollama server URL.
+            model: Model to use (must be pulled first).
+            confidence_threshold: Minimum confidence for auto-answering.
+            timeout: Request timeout in seconds.
+        """
+        self._host = host
+        self._model = model
+        self._confidence_threshold = confidence_threshold
+        self._timeout = timeout
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        """Get or create the Ollama client."""
+        if self._client is not None:
+            return self._client
+
+        try:
+            import ollama
+        except ImportError as e:
+            raise ImportError(
+                "ollama package is required for Ollama brain. "
+                "Install with: pip install ollama"
+            ) from e
+
+        self._client = ollama.Client(host=self._host, timeout=self._timeout)
+        return self._client
+
+    async def answer_question(
+        self,
+        question: str,
+        options: list[dict[str, str]],
+        context: QuestionContext,
+    ) -> BrainAnswer:
+        """Answer a question from Claude Code using local LLM.
+
+        Args:
+            question: The question text
+            options: Available options [{label, description}]
+            context: Additional context for answering
+
+        Returns:
+            BrainAnswer with selected option, confidence, and reasoning
+        """
+        try:
+            client = self._get_client()
+
+            # Build the prompt
+            options_text = "\n".join(
+                f"  - {opt.get('label', '')}: {opt.get('description', '')}"
+                for opt in options
+            )
+
+            user_prompt = f"""Project: {context.project_path}
+Current Task: {context.current_task or 'Not specified'}
+
+Question: {question}
+
+Available options:
+{options_text if options else 'No specific options provided - answer freely'}
+
+{f'Requirements context: {context.requirements_text[:500]}...' if context.requirements_text else ''}
+
+Please analyze this question and provide your response."""
+
+            # Make the API call (synchronous, but we're in an async context)
+            # Ollama client is synchronous, so we run it directly
+            response = client.chat(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": QUESTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+
+            response_text = response.get("message", {}).get("content", "")
+
+            # Parse the response
+            return self._parse_question_response(response_text, options)
+
+        except ImportError:
+            logger.warning("ollama not installed, falling back to escalation")
+            return BrainAnswer(
+                selected=None,
+                confidence=0.0,
+                reasoning="Ollama brain not available - ollama package not installed",
+            )
+        except Exception as e:
+            logger.error(f"Ollama API error: {e}")
+            return BrainAnswer(
+                selected=None,
+                confidence=0.0,
+                reasoning=f"Ollama API error: {e}",
+            )
+
+    async def evaluate_permission(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: PermissionContext,
+    ) -> PermissionDecision:
+        """Evaluate a medium-risk permission request using local LLM.
+
+        Args:
+            tool_name: Name of the tool (Write, Edit, Bash, etc.)
+            tool_input: Input parameters for the tool
+            context: Session and project context
+
+        Returns:
+            PermissionDecision indicating whether to approve
+        """
+        try:
+            client = self._get_client()
+
+            # Build the prompt
+            input_summary = self._format_tool_input(tool_name, tool_input)
+
+            user_prompt = f"""Project: {context.project_path}
+Current Task: {context.current_task or 'Not specified'}
+
+Tool: {tool_name}
+Input: {input_summary}
+
+Recent tools used: {', '.join(context.recent_tools[-5:]) if context.recent_tools else 'None'}
+Recently modified files: {', '.join(context.modified_files[-5:]) if context.modified_files else 'None'}
+
+Please evaluate whether to approve this tool use."""
+
+            # Make the API call
+            response = client.chat(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": PERMISSION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+
+            response_text = response.get("message", {}).get("content", "")
+
+            # Parse the response
+            return self._parse_permission_response(response_text)
+
+        except ImportError:
+            logger.warning("ollama not installed, falling back to escalation")
+            return PermissionDecision(
+                approve=False,
+                confidence=0.0,
+                reason="Ollama brain not available - ollama package not installed",
+                requires_human=True,
+            )
+        except Exception as e:
+            logger.error(f"Ollama API error: {e}")
+            return PermissionDecision(
+                approve=False,
+                confidence=0.0,
+                reason=f"Ollama API error: {e}",
+                requires_human=True,
+            )
+
+    def _parse_question_response(
+        self, response_text: str, options: list[dict[str, str]]
+    ) -> BrainAnswer:
+        """Parse LLM response to a question."""
+        lines = response_text.strip().split("\n")
+
+        answer = None
+        confidence = 0.5
+        reasoning = "Unable to parse response"
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith("ANSWER:"):
+                answer = line[7:].strip()
+            elif line.startswith("CONFIDENCE:"):
+                try:
+                    confidence = float(line[11:].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("REASONING:"):
+                reasoning = line[10:].strip()
+
+        # Handle escalation
+        if answer and answer.upper() == "ESCALATE":
+            return BrainAnswer(
+                selected=None,
+                confidence=0.0,
+                reasoning=reasoning,
+            )
+
+        # Try to match answer to options
+        if answer and options:
+            # Check for exact match
+            for opt in options:
+                if opt.get("label", "").lower() == answer.lower():
+                    return BrainAnswer(
+                        selected=opt.get("label"),
+                        confidence=confidence,
+                        reasoning=reasoning,
+                    )
+
+            # Check for partial match
+            for opt in options:
+                if answer.lower() in opt.get("label", "").lower():
+                    return BrainAnswer(
+                        selected=opt.get("label"),
+                        confidence=confidence * 0.9,  # Slightly lower for partial match
+                        reasoning=reasoning,
+                    )
+
+        return BrainAnswer(
+            selected=answer,
+            confidence=confidence,
+            reasoning=reasoning,
+        )
+
+    def _parse_permission_response(self, response_text: str) -> PermissionDecision:
+        """Parse LLM response to a permission request."""
+        lines = response_text.strip().split("\n")
+
+        decision = "ESCALATE"
+        confidence = 0.5
+        reasoning = "Unable to parse response"
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith("DECISION:"):
+                decision = line[9:].strip().upper()
+            elif line.startswith("CONFIDENCE:"):
+                try:
+                    confidence = float(line[11:].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("REASONING:"):
+                reasoning = line[10:].strip()
+
+        if decision == "APPROVE":
+            return PermissionDecision(
+                approve=True,
+                confidence=confidence,
+                reason=reasoning,
+                requires_human=False,
+            )
+        elif decision == "DENY":
+            return PermissionDecision(
+                approve=False,
+                confidence=confidence,
+                reason=reasoning,
+                requires_human=False,
+            )
+        else:  # ESCALATE or unknown
+            return PermissionDecision(
+                approve=False,
+                confidence=0.0,
+                reason=reasoning,
+                requires_human=True,
+            )
+
+    def _format_tool_input(self, tool_name: str, tool_input: dict[str, Any]) -> str:
+        """Format tool input for the prompt."""
+        match tool_name:
+            case "Bash":
+                return f"command: {tool_input.get('command', '')}"
+            case "Write":
+                content = tool_input.get("content", "")
+                lines = len(content.splitlines())
+                return f"file: {tool_input.get('file_path', '')} ({lines} lines)"
+            case "Edit":
+                return (
+                    f"file: {tool_input.get('file_path', '')}, "
+                    f"old: '{tool_input.get('old_string', '')[:50]}...', "
+                    f"new: '{tool_input.get('new_string', '')[:50]}...'"
+                )
+            case "Read":
+                return f"file: {tool_input.get('file_path', '')}"
+            case "Task":
+                return f"prompt: {tool_input.get('prompt', '')[:100]}..."
+            case _:
+                # Generic formatting
+                return str(tool_input)[:200]
+
+    def get_confidence_threshold(self) -> float:
+        """Get the minimum confidence threshold for auto-answering."""
+        return self._confidence_threshold
+
+
+def check_ollama_available(host: str = "http://localhost:11434") -> tuple[bool, str]:
+    """Check if Ollama server is available.
+
+    Args:
+        host: Ollama server URL
+
+    Returns:
+        Tuple of (is_available, message)
+    """
+    try:
+        import ollama
+
+        client = ollama.Client(host=host, timeout=5)
+        # Try to list models
+        client.list()
+        return True, "Ollama server is running"
+    except ImportError:
+        return False, "ollama package not installed"
+    except Exception as e:
+        return False, f"Cannot connect to Ollama: {e}"
+
+
+def list_ollama_models(host: str = "http://localhost:11434") -> list[str]:
+    """List available Ollama models.
+
+    Args:
+        host: Ollama server URL
+
+    Returns:
+        List of model names
+    """
+    try:
+        import ollama
+
+        client = ollama.Client(host=host, timeout=5)
+        response = client.list()
+
+        # Handle both dict response (older API) and ListResponse object (newer API)
+        if hasattr(response, "models"):
+            # Newer ollama package returns ListResponse with .models attribute
+            models = response.models
+            return [m.model for m in models if hasattr(m, "model") and m.model]
+        elif isinstance(response, dict):
+            # Older ollama package returns dict
+            models = response.get("models", [])
+            return [m.get("name", "") for m in models if m.get("name")]
+        else:
+            return []
+    except Exception:
+        return []

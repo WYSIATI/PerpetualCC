@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/chesterlee/.claude/**)",
+      "Read(//Users/chesterlee/**)",
+      "Bash(uv venv:*)",
+      "Bash(source:*)",
+      "Bash(uv pip install:*)",
+      "Bash(pcc --help:*)",
+      "Bash(pcc version:*)",
+      "Bash(pcc start --help:*)",
+      "Bash(pcc start:*)",
+      "Bash(ruff check:*)",
+      "Bash(ruff format:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python -m ruff check:*)",
+      "Bash(python:*)",
+      "Bash(wc:*)",
+      "Bash(pip install:*)",
+      "Bash(pytest:*)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(pip show:*)",
+      "Bash(grep:*)",
+      "Bash(python3.11:*)",
+      "Bash(python3.12 --version:*)",
+      "Bash(pcc list --help:*)",
+      "Bash(pcc stats:*)",
+      "Bash(pcc list:*)",
+      "Bash(python3:*)",
+      "Bash(pip index:*)",
+      "Bash(pcc pending --help:*)",
+      "Bash(pcc respond --help:*)",
+      "Bash(pcc pending:*)",
+      "Bash(pcc attach --help:*)",
+      "Bash(pcc config --help:*)",
+      "Bash(pcc config:*)",
+      "Bash(ollama list:*)",
+      "Bash(curl:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
