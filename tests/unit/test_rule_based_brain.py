@@ -432,247 +432,281 @@ class TestAnswerQuestionUnknown:
 
 
 class TestEvaluatePermissionGit:
-    """Tests for evaluating Git permission requests."""
+    """Tests for evaluating Git permission requests.
+
+    NOTE: The rule-based brain now returns LOW confidence suggestions
+    (not auto-approvals) to defer final decisions to LLM brains or humans.
+    Read-only git commands (status, log, diff) are now LOW risk and handled
+    by the risk_classifier, not the brain.
+    """
 
     @pytest.mark.asyncio
-    async def test_git_status_approved(
+    async def test_git_status_not_matched(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """git status should be approved."""
+        """git status is now LOW risk (handled by classifier), brain returns no match."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "git status"}, permission_context
         )
-        assert decision.approve is True
-        assert decision.confidence >= 0.8
+        # No pattern matches - escalates to human
+        assert decision.requires_human is True
 
     @pytest.mark.asyncio
-    async def test_git_log_approved(
+    async def test_git_log_not_matched(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """git log should be approved."""
+        """git log is now LOW risk (handled by classifier), brain returns no match."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "git log --oneline"}, permission_context
         )
-        assert decision.approve is True
+        assert decision.requires_human is True
 
     @pytest.mark.asyncio
-    async def test_git_diff_approved(
+    async def test_git_diff_not_matched(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """git diff should be approved."""
+        """git diff is now LOW risk (handled by classifier), brain returns no match."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "git diff HEAD"}, permission_context
         )
-        assert decision.approve is True
+        assert decision.requires_human is True
 
     @pytest.mark.asyncio
-    async def test_git_commit_approved(
+    async def test_git_commit_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """git commit should be approved."""
+        """git commit should suggest approval with LOW confidence (needs LLM/human confirmation)."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "git commit -m 'fix bug'"}, permission_context
         )
         assert decision.approve is True
-        assert decision.confidence >= 0.7
+        # Low confidence to defer to LLM/human
+        assert decision.confidence < 0.6
 
     @pytest.mark.asyncio
-    async def test_git_push_approved(
+    async def test_git_push_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """git push should be approved."""
+        """git push should suggest approval with LOW confidence (needs verification)."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "git push origin main"}, permission_context
         )
         assert decision.approve is True
-        assert decision.confidence >= 0.65
+        # Low confidence to defer to LLM/human
+        assert decision.confidence <= 0.5
 
     @pytest.mark.asyncio
-    async def test_git_push_force_denied(
+    async def test_git_push_force_denied_high_confidence(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """git push --force should be denied."""
+        """git push --force should be DENIED with HIGH confidence."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "git push --force origin main"}, permission_context
         )
         assert decision.approve is False
-        assert decision.confidence >= 0.85
+        assert decision.confidence >= 0.9  # High confidence denial
 
 
 class TestEvaluatePermissionNetwork:
-    """Tests for evaluating network operation permissions."""
+    """Tests for evaluating network operation permissions.
+
+    NOTE: Network operations now have very LOW confidence suggestions
+    to ensure they get proper LLM evaluation or human review.
+    """
 
     @pytest.mark.asyncio
-    async def test_curl_download_approved(
+    async def test_curl_download_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """curl with -o should be approved."""
+        """curl with -o suggests approval but needs verification."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "curl -o file.txt https://example.com/file"}, permission_context
         )
         assert decision.approve is True
+        assert decision.confidence < 0.5  # Low confidence
 
     @pytest.mark.asyncio
-    async def test_curl_general_approved_cautiously(
+    async def test_curl_general_suggests_approval_low_confidence(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """curl general use should be approved with caution."""
+        """curl general use suggests approval with very low confidence."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "curl https://api.example.com"}, permission_context
         )
         assert decision.approve is True
-        assert decision.confidence >= 0.55
-        assert decision.confidence < 0.75  # Lower confidence
+        assert decision.confidence < 0.5  # Very low confidence
 
     @pytest.mark.asyncio
-    async def test_wget_approved_cautiously(
+    async def test_wget_suggests_approval_low_confidence(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """wget should be approved with caution."""
+        """wget suggests approval with low confidence (needs verification)."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "wget https://example.com/file.tar.gz"}, permission_context
         )
         assert decision.approve is True
-        assert decision.confidence >= 0.55
+        assert decision.confidence < 0.5  # Low confidence
 
 
 class TestEvaluatePermissionDocker:
-    """Tests for evaluating Docker permission requests."""
+    """Tests for evaluating Docker permission requests.
+
+    NOTE: Read-only docker commands (ps, images, logs) are now LOW risk.
+    Build/run suggest approval with low confidence. Cleanup ops are denied.
+    """
 
     @pytest.mark.asyncio
-    async def test_docker_build_approved(
+    async def test_docker_build_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """docker build should be approved."""
+        """docker build suggests approval with low confidence."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "docker build -t myapp ."}, permission_context
         )
         assert decision.approve is True
-        assert decision.confidence >= 0.65
+        assert decision.confidence < 0.6  # Low confidence
 
     @pytest.mark.asyncio
-    async def test_docker_run_approved(
+    async def test_docker_run_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """docker run should be approved."""
+        """docker run suggests approval with low confidence."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "docker run -d myapp"}, permission_context
         )
         assert decision.approve is True
+        assert decision.confidence < 0.6  # Low confidence
 
     @pytest.mark.asyncio
-    async def test_docker_ps_approved(
+    async def test_docker_ps_no_match(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """docker ps should be approved."""
+        """docker ps is now LOW risk (handled by classifier), brain returns no match."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "docker ps"}, permission_context
         )
-        assert decision.approve is True
+        # docker ps is read-only, handled by risk classifier as LOW
+        # Rule-based brain doesn't have a pattern for it
+        assert decision.requires_human is True
 
     @pytest.mark.asyncio
-    async def test_docker_rm_denied(
+    async def test_docker_rm_denied_high_confidence(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """docker rm should be denied."""
+        """docker rm should be DENIED with high confidence."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "docker rm container_id"}, permission_context
         )
         assert decision.approve is False
+        assert decision.confidence >= 0.8  # High confidence denial
 
     @pytest.mark.asyncio
-    async def test_docker_prune_denied(
+    async def test_docker_prune_denied_high_confidence(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """docker system prune should be denied."""
+        """docker system prune should be DENIED with high confidence."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "docker system prune -a"}, permission_context
         )
         assert decision.approve is False
+        assert decision.confidence >= 0.8  # High confidence denial
 
 
 class TestEvaluatePermissionConfigFiles:
-    """Tests for evaluating config file permission requests."""
+    """Tests for evaluating config file permission requests.
+
+    NOTE: Config file patterns now return low confidence suggestions.
+    """
 
     @pytest.mark.asyncio
-    async def test_write_package_json_approved(
+    async def test_write_package_json_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """Writing package.json should be approved."""
+        """Writing package.json suggests approval with low confidence."""
         decision = await brain.evaluate_permission(
             "Write", {"file_path": "/project/package.json"}, permission_context
         )
         assert decision.approve is True
-        assert decision.confidence >= 0.65
+        assert decision.confidence < 0.6  # Low confidence
 
     @pytest.mark.asyncio
-    async def test_edit_package_json_approved(
+    async def test_edit_package_json_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """Editing package.json should be approved."""
+        """Editing package.json suggests approval with low confidence."""
         decision = await brain.evaluate_permission(
             "Edit",
             {"file_path": "/project/package.json", "old_string": "a", "new_string": "b"},
             permission_context,
         )
         assert decision.approve is True
+        assert decision.confidence < 0.6
 
     @pytest.mark.asyncio
-    async def test_write_tsconfig_approved(
+    async def test_write_tsconfig_no_match(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """Writing tsconfig.json should be approved."""
+        """tsconfig.json (not in pattern) returns no match - escalates."""
         decision = await brain.evaluate_permission(
             "Write", {"file_path": "/project/tsconfig.json"}, permission_context
         )
-        assert decision.approve is True
+        # tsconfig.json is not in our simplified pattern list
+        assert decision.requires_human is True
 
     @pytest.mark.asyncio
-    async def test_write_pyproject_approved(
+    async def test_write_pyproject_suggests_approval(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """Writing pyproject.toml should be approved."""
+        """Writing pyproject.toml suggests approval with low confidence."""
         decision = await brain.evaluate_permission(
             "Write", {"file_path": "/project/pyproject.toml"}, permission_context
         )
         assert decision.approve is True
+        assert decision.confidence < 0.6
 
 
 class TestEvaluatePermissionFileOps:
-    """Tests for evaluating file operation permissions."""
+    """Tests for evaluating file operation permissions.
+
+    NOTE: File operations now suggest with very low confidence.
+    """
 
     @pytest.mark.asyncio
-    async def test_simple_rm_approved(
+    async def test_simple_rm_suggests_approval_low_confidence(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """Simple rm (not -rf) should be approved."""
+        """Simple rm suggests approval with VERY LOW confidence (risky operation)."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "rm temp.txt"}, permission_context
         )
         assert decision.approve is True
+        assert decision.confidence < 0.5  # Very low - deletion needs review
 
     @pytest.mark.asyncio
-    async def test_mv_approved(self, brain: RuleBasedBrain, permission_context: PermissionContext):
-        """mv should be approved."""
+    async def test_mv_suggests_approval_low_confidence(
+        self, brain: RuleBasedBrain, permission_context: PermissionContext
+    ):
+        """mv suggests approval with low confidence."""
         decision = await brain.evaluate_permission(
             "Bash", {"command": "mv old.py new.py"}, permission_context
         )
         assert decision.approve is True
+        assert decision.confidence <= 0.5
 
 
 class TestEvaluatePermissionTask:
     """Tests for evaluating Task tool permissions."""
 
     @pytest.mark.asyncio
-    async def test_task_approved(
+    async def test_task_suggests_approval_low_confidence(
         self, brain: RuleBasedBrain, permission_context: PermissionContext
     ):
-        """Task tool should be approved."""
+        """Task tool suggests approval with low confidence (needs verification)."""
         decision = await brain.evaluate_permission(
             "Task", {"prompt": "Search for files", "subagent_type": "Explore"}, permission_context
         )
         assert decision.approve is True
-        assert decision.confidence >= 0.7
+        assert decision.confidence < 0.6  # Low confidence
 
 
 class TestEvaluatePermissionUnknown:

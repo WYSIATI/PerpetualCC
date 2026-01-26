@@ -9,12 +9,29 @@ PerpetualCC acts like an experienced human developer - understanding project con
 
 ---
 
+## Why PerpetualCC?
+
+### 🔄 Never Miss a Token Reset
+
+When Claude Code hits its token limit, PerpetualCC **automatically detects the reset time and resumes your session** the moment tokens are available again. No more forgetting to come back, no more lost momentum.
+
+### 🧠 Intelligent Question Answering
+
+Claude Code often asks questions like "Should I proceed?" or "Which approach do you prefer?" PerpetualCC **automatically answers these questions** using:
+- **Rule-based patterns** - No AI needed, handles common questions instantly
+- **Gemini API** - Context-aware responses for complex decisions
+- **Local LLM (Ollama)** - Privacy-focused, works offline with DeepSeek or other models
+
+You stay focused on high-level decisions while PerpetualCC handles the routine interactions.
+
+---
+
 ## Features
 
 - **Autonomous Operation** - Runs Claude Code sessions unattended, handling permissions and questions automatically
-- **Smart Decision Engine** - Risk-based permission handling: auto-approves safe operations, escalates dangerous ones
-- **Multiple Brain Options** - Rule-based (no AI), Gemini API, or local LLM via Ollama
-- **Rate Limit Recovery** - Detects limits, saves state, auto-resumes with full context
+- **Auto-Resume on Token Reset** - Detects rate limits, saves session state, and automatically resumes when tokens are available
+- **Smart Question Answering** - Multiple brain options (rule-based, Gemini, Ollama) to answer Claude Code's questions
+- **Risk-Based Permissions** - Auto-approves safe operations, asks brain for medium-risk, escalates dangerous ones to human
 - **Multi-Session Management** - Run and monitor multiple concurrent sessions
 - **Human Bridge** - macOS notifications when human input is needed
 - **Project Understanding** - RAG-powered codebase knowledge (optional)

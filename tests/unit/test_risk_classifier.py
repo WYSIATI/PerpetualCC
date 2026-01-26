@@ -204,10 +204,20 @@ class TestBashOperations:
         result = classifier.classify("Bash", {"command": "git push -f origin main"})
         assert result.level == RiskLevel.HIGH
 
-    def test_git_status_is_medium_risk(self, classifier: RiskClassifier):
-        """git status should be medium risk (git commands)."""
+    def test_git_status_is_low_risk(self, classifier: RiskClassifier):
+        """git status (read-only) should be LOW risk."""
         result = classifier.classify("Bash", {"command": "git status"})
-        assert result.level == RiskLevel.MEDIUM
+        assert result.level == RiskLevel.LOW
+
+    def test_git_log_is_low_risk(self, classifier: RiskClassifier):
+        """git log (read-only) should be LOW risk."""
+        result = classifier.classify("Bash", {"command": "git log --oneline"})
+        assert result.level == RiskLevel.LOW
+
+    def test_git_diff_is_low_risk(self, classifier: RiskClassifier):
+        """git diff (read-only) should be LOW risk."""
+        result = classifier.classify("Bash", {"command": "git diff HEAD"})
+        assert result.level == RiskLevel.LOW
 
     def test_git_commit_is_medium_risk(self, classifier: RiskClassifier):
         """git commit should be medium risk."""
@@ -219,9 +229,14 @@ class TestBashOperations:
         result = classifier.classify("Bash", {"command": "curl https://api.example.com/data"})
         assert result.level == RiskLevel.MEDIUM
 
-    def test_docker_is_medium_risk(self, classifier: RiskClassifier):
-        """docker commands should be medium risk."""
+    def test_docker_ps_is_low_risk(self, classifier: RiskClassifier):
+        """docker ps (read-only) should be LOW risk."""
         result = classifier.classify("Bash", {"command": "docker ps"})
+        assert result.level == RiskLevel.LOW
+
+    def test_docker_build_is_medium_risk(self, classifier: RiskClassifier):
+        """docker build should be medium risk."""
+        result = classifier.classify("Bash", {"command": "docker build -t app ."})
         assert result.level == RiskLevel.MEDIUM
 
     def test_simple_rm_is_medium_risk(self, classifier: RiskClassifier):

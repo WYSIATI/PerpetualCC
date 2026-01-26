@@ -106,15 +106,24 @@ class RiskConfig:
         r"git\s+reset\s+--hard\s+origin",
     )
 
+    # Read-only git commands are LOW risk, not MEDIUM
+    low_risk_bash_patterns: tuple[str, ...] = (
+        r"^git\s+(status|log|diff|branch|show|describe|remote|tag|stash\s+list)\b",
+        r"^git\s+(fetch|pull)\b",  # Sync operations are generally safe
+        r"^docker\s+(ps|images|logs|inspect)\b",  # Read-only docker commands
+        r"^kubectl\s+(get|describe|logs)\b",  # Read-only k8s commands
+    )
+
     medium_risk_bash_patterns: tuple[str, ...] = (
-        r"git\s+",
+        r"git\s+(add|commit|checkout|merge|rebase|cherry-pick)\b",
+        r"git\s+push\b(?!\s+--force)",  # Push without force is medium, force is high
         r"curl\s+",
         r"wget\s+",
         r"ssh\s+",
         r"scp\s+",
         r"rsync\s+",
-        r"docker\s+",
-        r"kubectl\s+",
+        r"docker\s+(build|run|exec|start|stop|restart|rm|rmi)\b",
+        r"kubectl\s+(apply|create|delete|edit|patch)\b",
         r"aws\s+",
         r"gcloud\s+",
         r"az\s+",
@@ -317,6 +326,15 @@ class RiskClassifier:
                 return RiskClassification(
                     level=RiskLevel.HIGH,
                     reason="Dangerous bash command pattern detected",
+                    matched_pattern=pattern,
+                )
+
+        # Check for low-risk patterns (read-only operations)
+        for pattern in self.config.low_risk_bash_patterns:
+            if re.search(pattern, command, re.IGNORECASE):
+                return RiskClassification(
+                    level=RiskLevel.LOW,
+                    reason="Read-only command",
                     matched_pattern=pattern,
                 )
 

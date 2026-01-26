@@ -145,134 +145,115 @@ def default_question_patterns() -> tuple[QuestionPattern, ...]:
 
 
 def default_permission_patterns() -> tuple[PermissionPattern, ...]:
-    """Create default permission patterns for medium-risk operations."""
+    """Create default permission patterns for medium-risk operations.
+
+    IMPORTANT: These patterns are conservative and avoid "always allow" rules.
+    The rule-based brain returns low confidence for most operations, deferring
+    to LLM brains or human escalation. Only clearly dangerous operations are
+    confidently denied.
+
+    Pattern philosophy:
+    - DENY patterns: High confidence denial for clearly dangerous operations
+    - APPROVE patterns: Low confidence (below threshold) to suggest approval
+      but still require LLM evaluation or human confirmation
+    - No "always allow" - even safe-looking operations have modest confidence
+    """
     return (
-        # Git operations - generally safe in dev context
+        # HIGH CONFIDENCE DENIALS - clearly dangerous operations
         PermissionPattern(
             tool_name="Bash",
-            input_pattern=re.compile(
-                r"^git\s+(status|log|diff|branch|show|describe)", re.IGNORECASE
-            ),
-            approve=True,
+            input_pattern=re.compile(r"git\s+push\s+(--force|-f)", re.IGNORECASE),
+            approve=False,
+            confidence=0.95,
+            reasoning="Force push can destroy remote history - requires human approval",
+        ),
+        PermissionPattern(
+            tool_name="Bash",
+            input_pattern=re.compile(r"docker\s+(rm|rmi|prune|system\s+prune)", re.IGNORECASE),
+            approve=False,
             confidence=0.85,
-            reasoning="Read-only git operation",
+            reasoning="Docker cleanup can remove important containers/images",
         ),
         PermissionPattern(
             tool_name="Bash",
-            input_pattern=re.compile(r"^git\s+(add|commit)", re.IGNORECASE),
-            approve=True,
-            confidence=0.75,
-            reasoning="Local git commit operation",
-        ),
-        PermissionPattern(
-            tool_name="Bash",
-            input_pattern=re.compile(r"^git\s+(fetch|pull)", re.IGNORECASE),
-            approve=True,
-            confidence=0.75,
-            reasoning="Git sync operation",
-        ),
-        PermissionPattern(
-            tool_name="Bash",
-            input_pattern=re.compile(r"^git\s+push(?!\s+--force)", re.IGNORECASE),
-            approve=True,
-            confidence=0.70,
-            reasoning="Git push without force",
-        ),
-        PermissionPattern(
-            tool_name="Bash",
-            input_pattern=re.compile(r"^git\s+push\s+--force", re.IGNORECASE),
+            input_pattern=re.compile(r"kubectl\s+delete", re.IGNORECASE),
             approve=False,
             confidence=0.90,
-            reasoning="Force push is dangerous and requires human approval",
+            reasoning="Kubernetes delete operations are dangerous",
         ),
-        # Network operations - moderate caution
+
+        # LOW CONFIDENCE SUGGESTIONS - let LLM or human decide
+        # These return low confidence intentionally - they suggest approval
+        # but don't auto-approve. LLM brains will evaluate these with full context.
         PermissionPattern(
             tool_name="Bash",
-            input_pattern=re.compile(r"^curl\s+.*(-o|--output)", re.IGNORECASE),
+            input_pattern=re.compile(r"^git\s+(add|commit)\b", re.IGNORECASE),
             approve=True,
-            confidence=0.65,
-            reasoning="Curl download operation",
+            confidence=0.55,  # Below typical threshold - needs LLM/human confirmation
+            reasoning="Git commit - suggest approval but verify with context",
+        ),
+        PermissionPattern(
+            tool_name="Bash",
+            input_pattern=re.compile(r"^git\s+push\b(?!\s+(--force|-f))", re.IGNORECASE),
+            approve=True,
+            confidence=0.50,  # Below threshold - pushing needs verification
+            reasoning="Git push - suggest approval but verify target branch",
         ),
         PermissionPattern(
             tool_name="Bash",
             input_pattern=re.compile(r"^curl\s+", re.IGNORECASE),
             approve=True,
-            confidence=0.60,
-            reasoning="General curl operation - use caution",
+            confidence=0.45,  # Low - network operations need review
+            reasoning="Network operation - needs context verification",
         ),
         PermissionPattern(
             tool_name="Bash",
             input_pattern=re.compile(r"^wget\s+", re.IGNORECASE),
             approve=True,
-            confidence=0.60,
-            reasoning="General wget operation - use caution",
-        ),
-        # Docker operations - moderate risk
-        PermissionPattern(
-            tool_name="Bash",
-            input_pattern=re.compile(r"^docker\s+(build|run|ps|images|logs)", re.IGNORECASE),
-            approve=True,
-            confidence=0.70,
-            reasoning="Common docker development operation",
+            confidence=0.45,
+            reasoning="Network download - needs context verification",
         ),
         PermissionPattern(
             tool_name="Bash",
-            input_pattern=re.compile(r"^docker\s+(rm|rmi|prune|system)", re.IGNORECASE),
-            approve=False,
-            confidence=0.80,
-            reasoning="Docker cleanup operation requires human approval",
-        ),
-        # Config file writes - context dependent
-        PermissionPattern(
-            tool_name="Write",
-            input_pattern=re.compile(r"package\.json$", re.IGNORECASE),
+            input_pattern=re.compile(r"^docker\s+(build|run)\b", re.IGNORECASE),
             approve=True,
-            confidence=0.70,
-            reasoning="Package.json modification in development context",
-        ),
-        PermissionPattern(
-            tool_name="Edit",
-            input_pattern=re.compile(r"package\.json$", re.IGNORECASE),
-            approve=True,
-            confidence=0.70,
-            reasoning="Package.json edit in development context",
+            confidence=0.55,
+            reasoning="Docker build/run - suggest approval with context check",
         ),
         PermissionPattern(
             tool_name="Write",
-            input_pattern=re.compile(r"(tsconfig|pyproject\.toml|setup\.py)", re.IGNORECASE),
+            input_pattern=re.compile(r"(package\.json|pyproject\.toml|Cargo\.toml)$", re.IGNORECASE),
             approve=True,
-            confidence=0.70,
-            reasoning="Build configuration modification",
+            confidence=0.55,
+            reasoning="Config file modification - suggest approval with diff review",
         ),
         PermissionPattern(
             tool_name="Edit",
-            input_pattern=re.compile(r"(tsconfig|pyproject\.toml|setup\.py)", re.IGNORECASE),
+            input_pattern=re.compile(r"(package\.json|pyproject\.toml|Cargo\.toml)$", re.IGNORECASE),
             approve=True,
-            confidence=0.70,
-            reasoning="Build configuration edit",
+            confidence=0.55,
+            reasoning="Config file edit - suggest approval with diff review",
         ),
-        # Simple rm operations (not recursive with force)
         PermissionPattern(
             tool_name="Bash",
-            input_pattern=re.compile(r"^rm\s+(?!.*-rf)(?!.*-fr)", re.IGNORECASE),
+            input_pattern=re.compile(r"^rm\s+", re.IGNORECASE),
             approve=True,
-            confidence=0.65,
-            reasoning="Simple file removal without recursive force",
+            confidence=0.40,  # Very low - file deletion needs careful review
+            reasoning="File removal - needs careful path verification",
         ),
         PermissionPattern(
             tool_name="Bash",
             input_pattern=re.compile(r"^mv\s+", re.IGNORECASE),
             approve=True,
-            confidence=0.65,
-            reasoning="File move operation",
+            confidence=0.50,
+            reasoning="File move - suggest approval with path verification",
         ),
-        # Task tool - generally medium risk but useful
         PermissionPattern(
             tool_name="Task",
-            input_pattern=None,  # Match any task
+            input_pattern=None,
             approve=True,
-            confidence=0.75,
-            reasoning="Task tool for agent delegation",
+            confidence=0.55,
+            reasoning="Task delegation - suggest approval but verify task description",
         ),
     )
 

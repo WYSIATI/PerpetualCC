@@ -300,7 +300,8 @@ class TestPermissionCallback:
         from claude_agent_sdk.types import PermissionResultDeny
 
         callback = create_permission_callback(engine)
-        result = await callback("Bash", {"command": "git status"}, mock_sdk_context)
+        # git commit is medium risk (not git status which is now low risk)
+        result = await callback("Bash", {"command": "git commit -m 'test'"}, mock_sdk_context)
         assert isinstance(result, PermissionResultDeny)
 
 
@@ -332,8 +333,9 @@ class TestAsyncDecisionWithBrain:
         engine = DecisionEngine(temp_project, brain=mock_brain)
         context = PermissionContext(project_path=str(temp_project))
 
+        # Use git commit instead of git status (which is now low risk)
         decision = await engine.decide_permission_async(
-            "Bash", {"command": "git status"}, context=context
+            "Bash", {"command": "git commit -m 'test'"}, context=context
         )
         assert decision.approve is True
         assert decision.risk_level == RiskLevel.MEDIUM
@@ -373,3 +375,283 @@ class TestAsyncDecisionWithBrain:
         )
         assert decision.approve is False
         assert decision.risk_level == RiskLevel.HIGH
+
+
+class TestHighRiskWithLLMBrain:
+    """Tests for high-risk decisions with LLM brains (Ollama/Gemini)."""
+
+    @pytest.fixture
+    def mock_ollama_brain_approving(self):
+        """Create a mock Ollama brain that approves with high confidence."""
+
+        class OllamaBrain:
+            async def evaluate_permission(
+                self, tool_name: str, tool_input: dict[str, Any], context: PermissionContext
+            ) -> BrainPermissionDecision:
+                return BrainPermissionDecision(
+                    approve=True, confidence=0.9, reason="LLM evaluated as safe"
+                )
+
+        return OllamaBrain()
+
+    @pytest.fixture
+    def mock_ollama_brain_denying(self):
+        """Create a mock Ollama brain that denies."""
+
+        class OllamaBrain:
+            async def evaluate_permission(
+                self, tool_name: str, tool_input: dict[str, Any], context: PermissionContext
+            ) -> BrainPermissionDecision:
+                return BrainPermissionDecision(
+                    approve=False, confidence=0.85, reason="LLM evaluated as dangerous"
+                )
+
+        return OllamaBrain()
+
+    @pytest.fixture
+    def mock_ollama_brain_uncertain(self):
+        """Create a mock Ollama brain that is uncertain (low confidence)."""
+
+        class OllamaBrain:
+            async def evaluate_permission(
+                self, tool_name: str, tool_input: dict[str, Any], context: PermissionContext
+            ) -> BrainPermissionDecision:
+                return BrainPermissionDecision(
+                    approve=True, confidence=0.5, reason="Unsure about this operation"
+                )
+
+        return OllamaBrain()
+
+    @pytest.fixture
+    def mock_gemini_brain_approving(self):
+        """Create a mock Gemini brain that approves with high confidence."""
+
+        class GeminiBrain:
+            async def evaluate_permission(
+                self, tool_name: str, tool_input: dict[str, Any], context: PermissionContext
+            ) -> BrainPermissionDecision:
+                return BrainPermissionDecision(
+                    approve=True, confidence=0.85, reason="LLM evaluated as safe"
+                )
+
+        return GeminiBrain()
+
+    @pytest.mark.asyncio
+    async def test_high_risk_llm_approves_with_high_confidence(
+        self, temp_project: Path, mock_ollama_brain_approving
+    ):
+        """High-risk operations can be approved if LLM brain has high confidence."""
+        engine = DecisionEngine(temp_project, brain=mock_ollama_brain_approving)
+        context = PermissionContext(project_path=str(temp_project))
+
+        # rm -rf / is high risk but LLM brain approves with 0.9 confidence
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "rm -rf /"}, context=context
+        )
+        assert decision.approve is True
+        assert decision.risk_level == RiskLevel.HIGH
+        assert decision.requires_human is False
+        assert "LLM approved" in decision.reason
+
+    @pytest.mark.asyncio
+    async def test_high_risk_llm_denies_escalates_to_human(
+        self, temp_project: Path, mock_ollama_brain_denying
+    ):
+        """High-risk operations denied by LLM should escalate to human."""
+        engine = DecisionEngine(temp_project, brain=mock_ollama_brain_denying)
+        context = PermissionContext(project_path=str(temp_project))
+
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "rm -rf /"}, context=context
+        )
+        assert decision.approve is False
+        assert decision.risk_level == RiskLevel.HIGH
+        assert decision.requires_human is True
+        assert "LLM evaluation" in decision.reason
+
+    @pytest.mark.asyncio
+    async def test_high_risk_llm_uncertain_escalates_to_human(
+        self, temp_project: Path, mock_ollama_brain_uncertain
+    ):
+        """High-risk operations with low LLM confidence should escalate to human."""
+        engine = DecisionEngine(temp_project, brain=mock_ollama_brain_uncertain)
+        context = PermissionContext(project_path=str(temp_project))
+
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "rm -rf /"}, context=context
+        )
+        assert decision.approve is False
+        assert decision.risk_level == RiskLevel.HIGH
+        assert decision.requires_human is True
+        # Should escalate because confidence is below 0.8
+
+    @pytest.mark.asyncio
+    async def test_high_risk_gemini_brain_works(
+        self, temp_project: Path, mock_gemini_brain_approving
+    ):
+        """High-risk operations with Gemini brain should also use LLM evaluation."""
+        engine = DecisionEngine(temp_project, brain=mock_gemini_brain_approving)
+        context = PermissionContext(project_path=str(temp_project))
+
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "rm -rf /"}, context=context
+        )
+        assert decision.approve is True
+        assert decision.risk_level == RiskLevel.HIGH
+        assert decision.requires_human is False
+
+    @pytest.mark.asyncio
+    async def test_high_risk_no_context_falls_back_to_block(
+        self, temp_project: Path, mock_ollama_brain_approving
+    ):
+        """High-risk without context should fall back to blocking (sync behavior)."""
+        engine = DecisionEngine(temp_project, brain=mock_ollama_brain_approving)
+
+        # No context provided - should use sync path which blocks high risk
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "rm -rf /"}
+        )
+        assert decision.approve is False
+        assert decision.risk_level == RiskLevel.HIGH
+
+
+class TestLLMFirstDecisionMaking:
+    """Tests for LLM-first decision making philosophy.
+
+    When an LLM brain is available, it should make most decisions to reduce
+    human interaction. Only truly uncertain or sensitive operations should
+    escalate to humans.
+    """
+
+    @pytest.fixture
+    def confident_approving_brain(self):
+        """LLM brain that approves with good confidence."""
+
+        class ConfidentBrain:
+            async def evaluate_permission(
+                self, tool_name: str, tool_input: dict[str, Any], context: PermissionContext
+            ) -> BrainPermissionDecision:
+                return BrainPermissionDecision(
+                    approve=True, confidence=0.75, reason="LLM thinks this is safe"
+                )
+
+        return ConfidentBrain()
+
+    @pytest.fixture
+    def low_confidence_brain(self):
+        """LLM brain that approves but with low confidence."""
+
+        class LowConfidenceBrain:
+            async def evaluate_permission(
+                self, tool_name: str, tool_input: dict[str, Any], context: PermissionContext
+            ) -> BrainPermissionDecision:
+                return BrainPermissionDecision(
+                    approve=True, confidence=0.4, reason="Uncertain about this"
+                )
+
+        return LowConfidenceBrain()
+
+    @pytest.fixture
+    def confident_denying_brain(self):
+        """LLM brain that denies with high confidence."""
+
+        class DenyingBrain:
+            async def evaluate_permission(
+                self, tool_name: str, tool_input: dict[str, Any], context: PermissionContext
+            ) -> BrainPermissionDecision:
+                return BrainPermissionDecision(
+                    approve=False, confidence=0.9, reason="This looks dangerous"
+                )
+
+        return DenyingBrain()
+
+    @pytest.mark.asyncio
+    async def test_llm_approves_medium_risk_reduces_human_interaction(
+        self, temp_project: Path, confident_approving_brain
+    ):
+        """When LLM approves medium-risk with good confidence, no human escalation."""
+        engine = DecisionEngine(temp_project, brain=confident_approving_brain)
+        context = PermissionContext(project_path=str(temp_project))
+
+        # git commit is medium risk
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "git commit -m 'test'"}, context=context
+        )
+
+        # LLM approved with 0.75 confidence > 0.6 threshold
+        assert decision.approve is True
+        assert decision.requires_human is False
+        assert "LLM approved" in decision.reason
+
+    @pytest.mark.asyncio
+    async def test_llm_low_confidence_still_approves_medium_risk(
+        self, temp_project: Path, low_confidence_brain
+    ):
+        """Low confidence approval still approves (lean towards allowing)."""
+        engine = DecisionEngine(temp_project, brain=low_confidence_brain)
+        context = PermissionContext(project_path=str(temp_project))
+
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "git commit -m 'test'"}, context=context
+        )
+
+        # Even with low confidence, we still approve (philosophy: lean towards allowing)
+        assert decision.approve is True
+        assert decision.requires_human is False
+        assert "low confidence" in decision.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_llm_confident_denial_escalates_to_human(
+        self, temp_project: Path, confident_denying_brain
+    ):
+        """When LLM confidently denies, escalate to human for final decision."""
+        engine = DecisionEngine(temp_project, brain=confident_denying_brain)
+        context = PermissionContext(project_path=str(temp_project))
+
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "docker run --privileged dangerous"}, context=context
+        )
+
+        # LLM denied - escalate to human
+        assert decision.approve is False
+        assert decision.requires_human is True
+        assert "LLM denied" in decision.reason
+
+    @pytest.mark.asyncio
+    async def test_read_only_git_is_now_low_risk(self, temp_project: Path):
+        """Read-only git commands (status, log, diff) are now LOW risk."""
+        engine = DecisionEngine(temp_project)
+
+        for cmd in ["git status", "git log --oneline", "git diff HEAD", "git branch -a"]:
+            decision = engine.decide_permission("Bash", {"command": cmd})
+            assert decision.approve is True, f"{cmd} should be approved"
+            assert decision.risk_level == RiskLevel.LOW, f"{cmd} should be LOW risk"
+
+    @pytest.mark.asyncio
+    async def test_read_only_docker_is_now_low_risk(self, temp_project: Path):
+        """Read-only docker commands (ps, images, logs) are now LOW risk."""
+        engine = DecisionEngine(temp_project)
+
+        for cmd in ["docker ps", "docker images", "docker logs mycontainer", "docker inspect mycontainer"]:
+            decision = engine.decide_permission("Bash", {"command": cmd})
+            assert decision.approve is True, f"{cmd} should be approved"
+            assert decision.risk_level == RiskLevel.LOW, f"{cmd} should be LOW risk"
+
+    @pytest.mark.asyncio
+    async def test_medium_risk_threshold_is_configurable(self, temp_project: Path, confident_approving_brain):
+        """Medium risk confidence threshold can be configured."""
+        # Higher threshold requires more confidence
+        engine = DecisionEngine(
+            temp_project,
+            brain=confident_approving_brain,
+            medium_risk_confidence_threshold=0.9  # Very high threshold
+        )
+        context = PermissionContext(project_path=str(temp_project))
+
+        decision = await engine.decide_permission_async(
+            "Bash", {"command": "git commit -m 'test'"}, context=context
+        )
+
+        # Brain has 0.75 confidence, but threshold is 0.9
+        # Still approves but with lower threshold message
+        assert decision.approve is True  # Still approves (lean towards allowing)

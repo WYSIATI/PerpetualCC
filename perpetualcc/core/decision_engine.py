@@ -77,8 +77,13 @@ class DecisionEngine:
     The decision engine uses a risk classifier to determine the risk level
     of each tool use request, then routes to the appropriate handler:
     - LOW risk: Auto-approve with high confidence
-    - MEDIUM risk: Use brain (if available) or escalate
-    - HIGH risk: Block or escalate to human
+    - MEDIUM risk: Use LLM brain (if available) to decide, escalate only if uncertain
+    - HIGH risk: Use LLM brain (if available), escalate if uncertain or denied
+
+    Philosophy: When an LLM brain is available, it should make most decisions
+    to reduce human interaction. Only truly uncertain or sensitive operations
+    should escalate to humans. This provides a Claude Code-like experience
+    where the session continues smoothly unless human input is truly needed.
     """
 
     def __init__(
@@ -88,23 +93,40 @@ class DecisionEngine:
         risk_config: RiskConfig | None = None,
         auto_approve_low_risk: bool = True,
         block_high_risk: bool = True,
+        medium_risk_confidence_threshold: float = 0.6,
     ):
         """
         Initialize the decision engine.
 
         Args:
             project_path: Path to the project directory
-            brain: Optional brain for evaluating medium-risk requests
+            brain: Optional brain for evaluating medium/high-risk requests
             risk_config: Optional custom risk configuration
             auto_approve_low_risk: Whether to auto-approve low-risk requests
-            block_high_risk: Whether to auto-block high-risk requests
+            block_high_risk: Whether to auto-block high-risk requests (only when no LLM brain)
+            medium_risk_confidence_threshold: Confidence threshold for auto-approving
+                medium-risk operations when LLM brain is available (default 0.6)
         """
         self.project_path = Path(project_path).resolve()
         self.brain = brain
         self.auto_approve_low_risk = auto_approve_low_risk
         self.block_high_risk = block_high_risk
+        self.medium_risk_confidence_threshold = medium_risk_confidence_threshold
         self.classifier = RiskClassifier(project_path, risk_config)
         self._decision_history: list[DecisionRecord] = []
+
+    def _is_llm_brain(self) -> bool:
+        """Check if the brain is an LLM-based brain (not rule-based).
+
+        LLM brains (Ollama, Gemini) can provide intelligent evaluation
+        of high-risk operations, while rule-based brains just pattern match.
+        """
+        if self.brain is None:
+            return False
+
+        # Check brain class name to determine type
+        brain_class = type(self.brain).__name__
+        return brain_class in ("OllamaBrain", "GeminiBrain")
 
     def decide_permission(
         self,
@@ -153,8 +175,12 @@ class DecisionEngine:
         """
         Make an async permission decision, potentially using the brain.
 
-        This method can use the brain for medium-risk decisions that require
-        more sophisticated evaluation.
+        This method can use the brain for medium-risk and high-risk decisions
+        that require more sophisticated evaluation.
+
+        For HIGH risk operations:
+        - If LLM brain (Ollama/Gemini) is available: consult the brain
+        - If only rule-based brain or no brain: block or escalate
 
         Args:
             tool_name: Name of the tool
@@ -168,19 +194,80 @@ class DecisionEngine:
         # Classify the risk
         classification = self.classifier.classify(tool_name, tool_input)
 
+        decision: PermissionDecision
+
         # For medium risk with brain available, use async brain evaluation
+        # LLM brains should make decisions with lower escalation threshold
         if classification.level == RiskLevel.MEDIUM and self.brain and context:
-            decision = await self.brain.evaluate_permission(tool_name, tool_input, context)
-            # Add risk level to decision if not set
-            decision = PermissionDecision(
-                approve=decision.approve,
-                confidence=decision.confidence,
-                reason=decision.reason,
-                risk_level=RiskLevel.MEDIUM,
-                requires_human=decision.requires_human,
+            brain_decision = await self.brain.evaluate_permission(tool_name, tool_input, context)
+
+            # If LLM brain approves with sufficient confidence, auto-approve
+            # This reduces human interaction for common development operations
+            if brain_decision.approve and brain_decision.confidence >= self.medium_risk_confidence_threshold:
+                decision = PermissionDecision(
+                    approve=True,
+                    confidence=brain_decision.confidence,
+                    reason=f"LLM approved (medium risk): {brain_decision.reason}",
+                    risk_level=RiskLevel.MEDIUM,
+                    requires_human=False,
+                )
+            elif brain_decision.approve and brain_decision.confidence < self.medium_risk_confidence_threshold:
+                # LLM wants to approve but is uncertain - still approve but log it
+                # This is the "lean towards allowing" philosophy
+                decision = PermissionDecision(
+                    approve=True,
+                    confidence=brain_decision.confidence,
+                    reason=f"LLM approved with low confidence: {brain_decision.reason}",
+                    risk_level=RiskLevel.MEDIUM,
+                    requires_human=False,
+                )
+            elif not brain_decision.approve and brain_decision.confidence >= 0.8:
+                # LLM confidently denies - escalate to human for final decision
+                decision = PermissionDecision(
+                    approve=False,
+                    confidence=brain_decision.confidence,
+                    reason=f"LLM denied (medium risk): {brain_decision.reason}",
+                    risk_level=RiskLevel.MEDIUM,
+                    requires_human=True,
+                )
+            else:
+                # LLM uncertain about denial - escalate to human
+                decision = PermissionDecision(
+                    approve=False,
+                    confidence=brain_decision.confidence,
+                    reason=f"LLM uncertain: {brain_decision.reason}",
+                    risk_level=RiskLevel.MEDIUM,
+                    requires_human=True,
+                )
+
+        # For high risk with LLM brain available, consult the brain instead of auto-deny
+        elif classification.level == RiskLevel.HIGH and self._is_llm_brain() and context:
+            logger.info(
+                "High-risk operation, consulting LLM brain: %s %s",
+                tool_name,
+                self._summarize_input(tool_name, tool_input),
             )
+            brain_decision = await self.brain.evaluate_permission(tool_name, tool_input, context)
+
+            # For high-risk, be more conservative - if brain is uncertain, escalate
+            if brain_decision.confidence < 0.8 or not brain_decision.approve:
+                decision = PermissionDecision(
+                    approve=False,
+                    confidence=brain_decision.confidence,
+                    reason=f"High risk - LLM evaluation: {brain_decision.reason}",
+                    risk_level=RiskLevel.HIGH,
+                    requires_human=True,  # Always escalate uncertain high-risk decisions
+                )
+            else:
+                decision = PermissionDecision(
+                    approve=brain_decision.approve,
+                    confidence=brain_decision.confidence,
+                    reason=f"High risk - LLM approved: {brain_decision.reason}",
+                    risk_level=RiskLevel.HIGH,
+                    requires_human=False,
+                )
         else:
-            # Use synchronous routing
+            # Use synchronous routing (no brain or rule-based brain)
             decision = self._route_decision(classification, tool_name, tool_input)
 
         # Record the decision

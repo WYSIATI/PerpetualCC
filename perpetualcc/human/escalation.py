@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from perpetualcc.core.session_manager import ManagedSession
+    from perpetualcc.human.cli_prompt import InteractivePrompt
 
 logger = logging.getLogger(__name__)
 
@@ -618,18 +619,37 @@ class HumanBridge:
     - Notification system for alerting humans
     - CLI prompts for interactive response
 
-    Note: By default, all permissions are granted and all tools are allowed.
-    Escalation only happens for truly exceptional cases that need human review.
+    Interactive Mode (like Claude Code):
+    When interactive_mode=True, escalations prompt the user immediately
+    inline, allowing quick decisions without breaking the session flow.
+    The session continues after the user responds, providing a seamless
+    experience similar to Claude Code's permission prompts.
+
+    Non-Interactive Mode:
+    When interactive_mode=False, escalations are queued and the user
+    must respond via `pcc pending` and `pcc respond` commands.
     """
 
     def __init__(
         self,
         data_dir: Path | None = None,
         enable_notifications: bool = True,
+        interactive_mode: bool = True,
+        interactive_prompt: "InteractivePrompt | None" = None,
     ):
-        """Initialize the human bridge."""
+        """Initialize the human bridge.
+
+        Args:
+            data_dir: Data directory for persistence
+            enable_notifications: Send macOS notifications for escalations
+            interactive_mode: If True, prompt user inline immediately.
+                             If False, queue escalations for later response.
+            interactive_prompt: Optional custom interactive prompt handler
+        """
         self.data_dir = data_dir or DEFAULT_DATA_DIR
         self.enable_notifications = enable_notifications
+        self.interactive_mode = interactive_mode
+        self.interactive_prompt = interactive_prompt
 
         self._queue: EscalationQueue | None = None
         self._notifier = None
@@ -653,8 +673,17 @@ class HumanBridge:
 
             self._notifier = Notifier()
 
+        # Set up interactive prompt if in interactive mode
+        if self.interactive_mode and self.interactive_prompt is None:
+            from perpetualcc.human.cli_prompt import InteractivePrompt
+
+            self.interactive_prompt = InteractivePrompt()
+
         self._initialized = True
-        logger.info("Human bridge initialized")
+        logger.info(
+            "Human bridge initialized (interactive=%s)",
+            self.interactive_mode,
+        )
 
     async def close(self) -> None:
         """Close human bridge resources."""
@@ -668,6 +697,28 @@ class HumanBridge:
         if self._notifier:
             self._notifier.notify_escalation(request)
 
+    async def _prompt_interactive(self, request: EscalationRequest) -> str | None:
+        """Prompt user interactively inline.
+
+        This provides a Claude Code-like experience where the user is
+        prompted immediately and the session continues after response.
+        """
+        if not self.interactive_prompt:
+            return None
+
+        try:
+            # Use the interactive prompt synchronously (it handles its own I/O)
+            response = self.interactive_prompt.prompt_escalation(request)
+
+            # Record the response in the queue for history
+            if response:
+                await self._queue.respond(request.id, response)
+
+            return response
+        except Exception as e:
+            logger.warning("Interactive prompt failed: %s", e)
+            return None
+
     async def escalate_question(
         self,
         session: ManagedSession,
@@ -680,7 +731,8 @@ class HumanBridge:
     ) -> str | None:
         """Escalate a question to the human.
 
-        Waits indefinitely until a response is received.
+        In interactive mode: Prompts user immediately inline, session continues.
+        In non-interactive mode: Waits indefinitely until response via CLI.
         """
         if not self._initialized:
             await self.initialize()
@@ -699,10 +751,18 @@ class HumanBridge:
             },
         )
 
-        if wait_for_response:
-            return await self._queue.wait_for_response(request.id)
+        if not wait_for_response:
+            return None
 
-        return None
+        # Interactive mode: prompt immediately inline
+        if self.interactive_mode and self.interactive_prompt:
+            response = await self._prompt_interactive(request)
+            if response:
+                return response
+            # Fall through to wait if interactive prompt failed
+
+        # Non-interactive mode: wait for response via CLI
+        return await self._queue.wait_for_response(request.id)
 
     async def escalate_permission(
         self,
@@ -716,10 +776,10 @@ class HumanBridge:
     ) -> str | None:
         """Escalate a permission request to the human.
 
-        Note: By default, permissions are granted. This is only called
-        for exceptional cases that truly need human review.
+        In interactive mode: Prompts user immediately inline, session continues
+        after approval/denial. Provides Claude Code-like experience.
 
-        Waits indefinitely until a response is received.
+        In non-interactive mode: Waits for response via CLI commands.
         """
         if not self._initialized:
             await self.initialize()
@@ -750,16 +810,25 @@ class HumanBridge:
             },
         )
 
-        if wait_for_response:
-            response = await self._queue.wait_for_response(request.id)
-            if response:
-                return (
-                    "approve"
-                    if response.lower() in ("approve", "yes", "allow", "1")
-                    else "deny"
-                )
+        if not wait_for_response:
             return None
 
+        response = None
+
+        # Interactive mode: prompt immediately inline
+        if self.interactive_mode and self.interactive_prompt:
+            response = await self._prompt_interactive(request)
+
+        # Non-interactive mode or fallback: wait for response via CLI
+        if response is None:
+            response = await self._queue.wait_for_response(request.id)
+
+        if response:
+            return (
+                "approve"
+                if response.lower() in ("approve", "yes", "allow", "1")
+                else "deny"
+            )
         return None
 
     async def escalate_error(
@@ -771,7 +840,8 @@ class HumanBridge:
     ) -> str | None:
         """Escalate an error for human decision.
 
-        Waits indefinitely until a response is received.
+        In interactive mode: Prompts user immediately inline.
+        In non-interactive mode: Waits for response via CLI commands.
         """
         if not self._initialized:
             await self.initialize()
@@ -791,10 +861,17 @@ class HumanBridge:
             },
         )
 
-        if wait_for_response:
-            return await self._queue.wait_for_response(request.id)
+        if not wait_for_response:
+            return None
 
-        return None
+        # Interactive mode: prompt immediately inline
+        if self.interactive_mode and self.interactive_prompt:
+            response = await self._prompt_interactive(request)
+            if response:
+                return response
+
+        # Non-interactive mode: wait for response via CLI
+        return await self._queue.wait_for_response(request.id)
 
     async def get_pending(
         self, session_id: str | None = None
