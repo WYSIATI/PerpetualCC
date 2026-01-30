@@ -40,7 +40,7 @@ from perpetualcc.claude.types import (
 )
 from perpetualcc.core.checkpoint import SessionCheckpoint
 from perpetualcc.core.decision_engine import DecisionEngine, PermissionDecision
-from perpetualcc.core.rate_limit import RateLimitInfo, RateLimitMonitor
+from perpetualcc.core.rate_limit import RateLimitInfo, RateLimitMonitor, RateLimitType
 from perpetualcc.core.risk_classifier import RiskLevel
 
 if TYPE_CHECKING:
@@ -900,27 +900,58 @@ class MasterAgent:
         return event_count
 
     async def _handle_checkpoint_and_wait(self, action: Action, session: ManagedSession) -> None:
-        """Handle checkpoint creation and rate limit waiting."""
-        rate_limit_info = action.metadata.get("rate_limit_info")
-        retry_after = action.metadata.get("retry_after", 60)
+        """Handle checkpoint creation and rate limit waiting.
 
-        # Create checkpoint via session manager
-        # (The actual checkpoint is created in SessionManager._handle_rate_limit)
-        logger.info(
-            "Rate limit checkpoint: waiting %d seconds",
-            retry_after,
-        )
+        For token limits, waits until the actual reset time (can be hours).
+        Uses smart sleep intervals to avoid wasting compute power.
+        """
+        rate_limit_info: RateLimitInfo | None = action.metadata.get("rate_limit_info")
 
-        # Wait for reset with progress logging
-        async def progress_callback(remaining: int, total: int) -> None:
-            if remaining % 30 == 0 or remaining <= 5:
-                logger.info("Rate limit wait: %ds remaining", remaining)
+        if not rate_limit_info:
+            logger.warning("No rate limit info provided, using default wait")
+            return
 
-        if rate_limit_info:
-            await self.rate_monitor.wait_for_reset(
-                rate_limit_info,
-                progress_callback=lambda r, t: None,  # Simplified for now
+        # Get the actual wait time (respects reset_time for token limits)
+        wait_seconds = self.rate_monitor.get_adjusted_retry_seconds(rate_limit_info)
+
+        # Log appropriately based on wait duration
+        if rate_limit_info.limit_type == RateLimitType.TOKEN_LIMIT and wait_seconds > 300:
+            hours = wait_seconds / 3600
+            reset_time_str = (
+                rate_limit_info.reset_time.strftime("%Y-%m-%d %H:%M:%S")
+                if rate_limit_info.reset_time
+                else "unknown"
             )
+            logger.info(
+                "Token limit reached. Waiting %.1f hours until reset at %s. "
+                "Session will resume automatically.",
+                hours,
+                reset_time_str,
+            )
+        else:
+            logger.info(
+                "Rate limit checkpoint: waiting %d seconds (type=%s)",
+                wait_seconds,
+                rate_limit_info.limit_type.value,
+            )
+
+        # Progress callback for logging
+        def progress_callback(remaining: int, total: int) -> None:
+            # Log every 5 minutes for long waits, every 30 seconds for short waits
+            if total > 300:
+                # Long wait: log every 5 minutes
+                if remaining % 300 == 0 and remaining > 0:
+                    logger.info("Rate limit wait: %.1f hours remaining", remaining / 3600)
+            else:
+                # Short wait: log every 30 seconds
+                if remaining % 30 == 0 or remaining <= 5:
+                    logger.info("Rate limit wait: %ds remaining", remaining)
+
+        # Wait for reset using smart intervals
+        await self.rate_monitor.wait_for_reset(
+            rate_limit_info,
+            progress_callback=progress_callback,
+        )
 
     async def _handle_human_escalation(
         self, action: Action, session: ManagedSession

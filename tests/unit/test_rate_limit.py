@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -656,3 +657,435 @@ class TestRateLimitIntegration:
         assert monitor.is_rate_limited is False
         assert monitor.consecutive_limits == 0
         assert len(monitor.get_history()) == 0
+
+
+class TestTokenLimitWaitBehavior:
+    """Tests for smart token limit wait behavior.
+
+    Token limits can reset hours in the future, so we need to:
+    1. Respect the actual reset_time (not cap at 5 minutes)
+    2. Use efficient sleep intervals (not 1-second polling for hours)
+    3. Distinguish token limits from other rate limit types
+    4. Wait until the exact reset_time (not countdown-based) for token limits
+    """
+
+    @pytest.fixture
+    def monitor(self) -> RateLimitMonitor:
+        """Create a monitor with default config."""
+        return RateLimitMonitor()
+
+    def test_config_has_max_token_limit_seconds(self):
+        """Config should have separate max for token limits."""
+        config = RateLimitConfig()
+        assert config.max_token_limit_seconds == 86400  # 24 hours
+        assert config.max_retry_seconds == 300  # 5 minutes for other types
+
+    def test_token_limit_respects_actual_reset_time(self, monitor: RateLimitMonitor):
+        """Token limits should use actual reset_time, not capped retry_after."""
+        # Simulate a token limit that resets in 2 hours
+        reset_time = datetime.now() + timedelta(hours=2)
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=7200,  # 2 hours
+            reset_time=reset_time,
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        adjusted = monitor.get_adjusted_retry_seconds(info)
+        # Should be approximately 2 hours (7200 seconds), not capped at 300
+        assert adjusted > 7000
+        assert adjusted <= 7200
+
+    def test_request_limit_still_capped(self, monitor: RateLimitMonitor):
+        """Request limits should still be capped at max_retry_seconds."""
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.REQUEST_LIMIT,
+            retry_after_seconds=600,  # 10 minutes
+            reset_time=datetime.now() + timedelta(minutes=10),
+            message="Rate limit exceeded",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        adjusted = monitor.get_adjusted_retry_seconds(info)
+        # Should be capped at 300 seconds (5 minutes)
+        assert adjusted == 300
+
+    def test_usage_limit_still_capped(self, monitor: RateLimitMonitor):
+        """Usage limits should still be capped at max_retry_seconds."""
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.USAGE_LIMIT,
+            retry_after_seconds=1000,
+            reset_time=datetime.now() + timedelta(seconds=1000),
+            message="Usage limit exceeded",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        adjusted = monitor.get_adjusted_retry_seconds(info)
+        assert adjusted == 300  # Capped
+
+    def test_token_limit_capped_at_24_hours(self, monitor: RateLimitMonitor):
+        """Token limits should be capped at 24 hours."""
+        # Simulate a token limit that claims to reset in 48 hours
+        reset_time = datetime.now() + timedelta(hours=48)
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=48 * 3600,  # 48 hours
+            reset_time=reset_time,
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        adjusted = monitor.get_adjusted_retry_seconds(info)
+        # Should be capped at 24 hours (86400 seconds)
+        assert adjusted == 86400
+
+    def test_token_limit_uses_remaining_seconds(self, monitor: RateLimitMonitor):
+        """Token limit should use remaining_seconds from reset_time."""
+        # Reset time 30 minutes from now
+        reset_time = datetime.now() + timedelta(minutes=30)
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=1800,
+            reset_time=reset_time,
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        adjusted = monitor.get_adjusted_retry_seconds(info)
+        # Should be approximately 30 minutes
+        assert 1700 <= adjusted <= 1800
+
+    def test_token_limit_without_reset_time_uses_retry_after(
+        self, monitor: RateLimitMonitor
+    ):
+        """Token limit without reset_time should use retry_after_seconds."""
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=3600,  # 1 hour
+            reset_time=None,  # No specific reset time
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        adjusted = monitor.get_adjusted_retry_seconds(info)
+        # Should use retry_after_seconds (1 hour)
+        assert adjusted == 3600
+
+    @pytest.mark.asyncio
+    async def test_wait_for_reset_uses_smart_intervals_long_wait(
+        self, monitor: RateLimitMonitor
+    ):
+        """Long waits (>1 hour) should use 5-minute sleep intervals."""
+        # Token limit resetting in 2 hours
+        reset_time = datetime.now() + timedelta(hours=2)
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=7200,
+            reset_time=reset_time,
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        sleep_calls: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            # Simulate time passing - break after a few calls for test speed
+            if len(sleep_calls) >= 5:
+                # Modify remaining time to exit loop
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            try:
+                await monitor.wait_for_reset(info)
+            except asyncio.CancelledError:
+                pass
+
+        # First few calls should be 5-minute intervals (300 seconds)
+        assert all(s == 300 for s in sleep_calls[:3])
+
+    @pytest.mark.asyncio
+    async def test_wait_for_reset_uses_smart_intervals_medium_wait(
+        self, monitor: RateLimitMonitor
+    ):
+        """Medium waits (5-60 min) should use 1-minute sleep intervals."""
+        # Token limit resetting in 10 minutes
+        reset_time = datetime.now() + timedelta(minutes=10)
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=600,
+            reset_time=reset_time,
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        sleep_calls: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 5:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            try:
+                await monitor.wait_for_reset(info)
+            except asyncio.CancelledError:
+                pass
+
+        # Calls should be 1-minute intervals (60 seconds)
+        assert all(s == 60 for s in sleep_calls[:3])
+
+    @pytest.mark.asyncio
+    async def test_wait_for_reset_uses_1_second_for_short_wait(
+        self, monitor: RateLimitMonitor
+    ):
+        """Short waits (<5 min) should use 1-second intervals for responsiveness."""
+        # Request limit (not token limit) with short wait
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.REQUEST_LIMIT,
+            retry_after_seconds=30,
+            reset_time=datetime.now() + timedelta(seconds=30),
+            message="Rate limit exceeded",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        sleep_calls: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 5:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            try:
+                await monitor.wait_for_reset(info)
+            except asyncio.CancelledError:
+                pass
+
+        # All calls should be 1-second intervals
+        assert all(s == 1 for s in sleep_calls)
+
+    def test_request_limit_backoff_still_works(self, monitor: RateLimitMonitor):
+        """Request limits should still apply exponential backoff."""
+        # First request limit
+        info1 = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.REQUEST_LIMIT,
+            retry_after_seconds=60,
+            reset_time=datetime.now() + timedelta(seconds=60),
+            message="Rate limit",
+        )
+        monitor._record_limit(info1)
+        first = monitor.get_adjusted_retry_seconds(info1)
+        assert first == 60
+
+        # Second consecutive limit - should apply backoff
+        info2 = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.REQUEST_LIMIT,
+            retry_after_seconds=60,
+            reset_time=datetime.now() + timedelta(seconds=60),
+            message="Rate limit again",
+        )
+        monitor._record_limit(info2)
+        second = monitor.get_adjusted_retry_seconds(info2)
+        # 60 * 1.5 = 90
+        assert second == 90
+
+    def test_token_limit_no_backoff(self, monitor: RateLimitMonitor):
+        """Token limits should use reset_time, not backoff."""
+        reset_time = datetime.now() + timedelta(hours=1)
+
+        # First token limit
+        info1 = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=3600,
+            reset_time=reset_time,
+            message="Token limit",
+        )
+        monitor._record_limit(info1)
+        first = monitor.get_adjusted_retry_seconds(info1)
+
+        # Second consecutive token limit
+        info2 = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=3600,
+            reset_time=reset_time,
+            message="Token limit again",
+        )
+        monitor._record_limit(info2)
+        second = monitor.get_adjusted_retry_seconds(info2)
+
+        # Both should be approximately the same (based on reset_time, not backoff)
+        assert abs(first - second) < 60  # Allow 1 minute variance
+
+    @pytest.mark.asyncio
+    async def test_token_limit_waits_until_exact_reset_time(
+        self, monitor: RateLimitMonitor
+    ):
+        """Token limit should wait until the exact reset_time, not countdown.
+
+        This test verifies the key behavior: token limits check datetime.now()
+        against reset_time, not decrementing a counter. This ensures no premature
+        retries before the actual reset time.
+        """
+        # Set reset time 5 seconds in the future
+        reset_time = datetime.now() + timedelta(seconds=5)
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=5,
+            reset_time=reset_time,
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        datetime_calls: list[datetime] = []
+        sleep_durations: list[float] = []
+        simulated_time = datetime.now()
+
+        def mock_datetime_now():
+            """Track datetime.now() calls."""
+            nonlocal simulated_time
+            datetime_calls.append(simulated_time)
+            return simulated_time
+
+        async def mock_sleep(seconds: float) -> None:
+            """Simulate time passing with each sleep call."""
+            nonlocal simulated_time
+            sleep_durations.append(seconds)
+            # Advance simulated time
+            simulated_time = simulated_time + timedelta(seconds=seconds)
+            # Stop after several iterations
+            if len(sleep_durations) >= 10:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            with patch(
+                "perpetualcc.core.rate_limit.datetime"
+            ) as mock_dt:
+                mock_dt.now = mock_datetime_now
+                try:
+                    await monitor.wait_for_reset(info)
+                except asyncio.CancelledError:
+                    pass
+
+        # Verify datetime.now() was called multiple times (time-based checking)
+        assert len(datetime_calls) > 1
+        # Verify sleep was called
+        assert len(sleep_durations) > 0
+
+    @pytest.mark.asyncio
+    async def test_token_limit_without_reset_time_uses_countdown(
+        self, monitor: RateLimitMonitor
+    ):
+        """Token limit without reset_time should fall back to countdown-based wait."""
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=10,
+            reset_time=None,  # No reset_time - should use countdown
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        sleep_calls: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 5:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            try:
+                await monitor.wait_for_reset(info)
+            except asyncio.CancelledError:
+                pass
+
+        # Should use 1-second intervals (countdown-based for short wait)
+        assert all(s == 1 for s in sleep_calls)
+
+    @pytest.mark.asyncio
+    async def test_request_limit_uses_countdown_not_reset_time(
+        self, monitor: RateLimitMonitor
+    ):
+        """Request limits should use countdown-based waiting, not reset_time based."""
+        # Even though reset_time is provided, REQUEST_LIMIT should use countdown
+        info = RateLimitInfo(
+            detected_at=datetime.now(),
+            limit_type=RateLimitType.REQUEST_LIMIT,
+            retry_after_seconds=10,
+            reset_time=datetime.now() + timedelta(seconds=10),
+            message="Rate limit exceeded",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        sleep_calls: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            if len(sleep_calls) >= 5:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            try:
+                await monitor.wait_for_reset(info)
+            except asyncio.CancelledError:
+                pass
+
+        # Should use countdown-based waiting
+        assert len(sleep_calls) > 0
+        # All intervals should be 1 second (short wait countdown)
+        assert all(s == 1 for s in sleep_calls)
+
+    @pytest.mark.asyncio
+    async def test_token_limit_completes_exactly_at_reset_time(
+        self, monitor: RateLimitMonitor
+    ):
+        """Token limit wait should complete when reset_time is reached."""
+        # Create a reset time that's already in the past (simulating time passed)
+        past_reset_time = datetime.now() - timedelta(seconds=1)
+        info = RateLimitInfo(
+            detected_at=datetime.now() - timedelta(seconds=10),
+            limit_type=RateLimitType.TOKEN_LIMIT,
+            retry_after_seconds=10,
+            reset_time=past_reset_time,  # Already passed
+            message="Token limit reached",
+        )
+        monitor._current_limit = info
+        monitor._consecutive_limits = 1
+
+        sleep_calls: list[float] = []
+
+        async def mock_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            await monitor.wait_for_reset(info)
+
+        # Should complete immediately without sleeping (reset_time already passed)
+        assert len(sleep_calls) == 0

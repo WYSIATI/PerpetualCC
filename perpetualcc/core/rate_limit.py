@@ -71,13 +71,15 @@ class RateLimitConfig:
 
     Attributes:
         default_retry_seconds: Default wait time when retry-after not specified
-        max_retry_seconds: Maximum wait time to prevent excessive delays
+        max_retry_seconds: Maximum wait time for request/overload limits
+        max_token_limit_seconds: Maximum wait time for token limits (can be hours)
         min_retry_seconds: Minimum wait time to ensure proper backoff
         backoff_multiplier: Multiplier for exponential backoff on repeated limits
     """
 
     default_retry_seconds: int = 60
-    max_retry_seconds: int = 300  # 5 minutes max
+    max_retry_seconds: int = 300  # 5 minutes max for request limits
+    max_token_limit_seconds: int = 86400  # 24 hours max for token limits
     min_retry_seconds: int = 10
     backoff_multiplier: float = 1.5
 
@@ -347,18 +349,35 @@ class RateLimitMonitor:
         self._current_limit = None
         self._consecutive_limits = 0
 
-    def get_adjusted_retry_seconds(self) -> int:
+    def get_adjusted_retry_seconds(self, limit_info: RateLimitInfo | None = None) -> int:
         """Get retry seconds with exponential backoff for consecutive limits.
 
+        For TOKEN_LIMIT types, respects the actual reset_time which may be hours away.
+        For other types, applies capped backoff.
+
+        Args:
+            limit_info: Optional specific limit info. If None, uses current limit.
+
         Returns:
-            Adjusted retry seconds based on consecutive limit count
+            Adjusted retry seconds based on limit type and consecutive count
         """
-        if not self._current_limit:
+        target_limit = limit_info or self._current_limit
+        if not target_limit:
             return self.config.default_retry_seconds
 
-        base = self._current_limit.retry_after_seconds
+        # For token limits, respect the actual reset time (can be hours)
+        if target_limit.limit_type == RateLimitType.TOKEN_LIMIT:
+            if target_limit.reset_time:
+                remaining = target_limit.remaining_seconds
+                # Clamp to max_token_limit_seconds (24 hours)
+                return min(remaining, self.config.max_token_limit_seconds)
+            # Fallback: use retry_after_seconds without strict cap
+            return min(target_limit.retry_after_seconds, self.config.max_token_limit_seconds)
+
+        # For other limit types (request, usage, overload), apply capped backoff
+        base = target_limit.retry_after_seconds
         if self._consecutive_limits <= 1:
-            return base
+            return min(base, self.config.max_retry_seconds)
 
         # Apply exponential backoff for consecutive limits
         multiplier = self.config.backoff_multiplier ** (self._consecutive_limits - 1)
@@ -372,6 +391,12 @@ class RateLimitMonitor:
     ) -> None:
         """Wait for the rate limit to reset.
 
+        For TOKEN_LIMIT types with a specific reset_time, waits until that exact
+        time arrives. This avoids any premature retries before the actual reset.
+
+        For other types or when no reset_time is available, uses countdown-based
+        waiting with efficient sleep intervals.
+
         Args:
             info: Optional specific rate limit info to wait for.
                   If None, uses current limit.
@@ -382,29 +407,144 @@ class RateLimitMonitor:
         if not target_info:
             return
 
-        # Use adjusted retry seconds for backoff
-        total_seconds = self.get_adjusted_retry_seconds()
-        remaining = total_seconds
-
-        logger.info(
-            "Waiting %d seconds for rate limit reset (consecutive=%d)",
-            total_seconds,
-            self._consecutive_limits,
+        # Determine if we should wait for a specific reset_time or use countdown
+        use_reset_time = (
+            target_info.reset_time is not None
+            and target_info.limit_type == RateLimitType.TOKEN_LIMIT
         )
 
-        while remaining > 0:
+        if use_reset_time:
+            await self._wait_until_reset_time(target_info, progress_callback)
+        else:
+            await self._wait_countdown(target_info, progress_callback)
+
+        logger.info("Rate limit wait complete")
+
+    async def _wait_until_reset_time(
+        self,
+        target_info: RateLimitInfo,
+        progress_callback: ProgressCallback | None,
+    ) -> None:
+        """Wait until the exact reset_time arrives.
+
+        This method continuously checks the actual reset_time rather than
+        counting down a static duration, ensuring no premature retries.
+        """
+        reset_time = target_info.reset_time
+        assert reset_time is not None  # Guaranteed by caller
+
+        # Check if reset time has already passed
+        now = datetime.now()
+        if now >= reset_time:
+            logger.info("Token limit reset time has already passed, proceeding immediately")
+            if progress_callback:
+                progress_callback(0, 0)
+            return
+
+        # Calculate initial total for progress reporting
+        initial_remaining = max(0, int((reset_time - now).total_seconds()))
+        total_seconds = initial_remaining
+
+        # Cap at 24 hours
+        if total_seconds > self.config.max_token_limit_seconds:
+            total_seconds = self.config.max_token_limit_seconds
+            # Adjust reset_time for capped wait
+            reset_time = datetime.now() + timedelta(seconds=total_seconds)
+
+        hours = total_seconds / 3600
+        logger.info(
+            "Token limit hit. Waiting until reset at %s (%.1f hours)",
+            reset_time.strftime("%Y-%m-%d %H:%M:%S"),
+            hours,
+        )
+
+        last_progress_log = total_seconds
+
+        # Wait until reset_time arrives (not countdown-based)
+        while datetime.now() < reset_time:
+            remaining = max(0, int((reset_time - datetime.now()).total_seconds()))
+
             if progress_callback:
                 progress_callback(remaining, total_seconds)
 
-            # Sleep in 1-second intervals for responsive progress updates
-            await asyncio.sleep(1)
-            remaining -= 1
+            # Smart sleep intervals based on remaining time
+            if remaining > 3600:
+                sleep_interval = 300  # 5 minutes
+            elif remaining > 300:
+                sleep_interval = 60  # 1 minute
+            else:
+                sleep_interval = 1  # 1 second
+
+            # Don't sleep past reset_time
+            sleep_interval = min(sleep_interval, remaining) if remaining > 0 else 1
+
+            await asyncio.sleep(sleep_interval)
+
+            # Log progress periodically for long waits
+            remaining_after = max(0, int((reset_time - datetime.now()).total_seconds()))
+            if remaining_after > 300 and (last_progress_log - remaining_after) >= 300:
+                hours_remaining = remaining_after / 3600
+                logger.info(
+                    "Rate limit wait: %.1f hours remaining",
+                    hours_remaining,
+                )
+                last_progress_log = remaining_after
 
         # Final callback at 0
         if progress_callback:
             progress_callback(0, total_seconds)
 
-        logger.info("Rate limit wait complete")
+    async def _wait_countdown(
+        self,
+        target_info: RateLimitInfo,
+        progress_callback: ProgressCallback | None,
+    ) -> None:
+        """Wait using countdown-based approach for non-token limits.
+
+        Used when there's no specific reset_time or for non-token limit types.
+        """
+        total_seconds = self.get_adjusted_retry_seconds(target_info)
+
+        logger.info(
+            "Waiting %d seconds for rate limit reset (type=%s, consecutive=%d)",
+            total_seconds,
+            target_info.limit_type.value,
+            self._consecutive_limits,
+        )
+
+        remaining = total_seconds
+        last_progress_log = total_seconds
+
+        while remaining > 0:
+            if progress_callback:
+                progress_callback(remaining, total_seconds)
+
+            # Smart sleep intervals
+            if remaining > 3600:
+                sleep_interval = 300  # 5 minutes
+            elif remaining > 300:
+                sleep_interval = 60  # 1 minute
+            else:
+                sleep_interval = 1  # 1 second
+
+            # Don't sleep longer than remaining time
+            sleep_interval = min(sleep_interval, remaining)
+
+            await asyncio.sleep(sleep_interval)
+            remaining -= sleep_interval
+
+            # Log progress periodically for long waits
+            if remaining > 300 and (last_progress_log - remaining) >= 300:
+                hours_remaining = remaining / 3600
+                logger.info(
+                    "Rate limit wait: %.1f hours remaining",
+                    hours_remaining,
+                )
+                last_progress_log = remaining
+
+        # Final callback at 0
+        if progress_callback:
+            progress_callback(0, total_seconds)
 
     def get_history(self, limit: int | None = None) -> list[RateLimitInfo]:
         """Get rate limit history.
