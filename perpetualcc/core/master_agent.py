@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -199,6 +200,8 @@ class MasterAgentConfig:
         auto_approve_low_risk: Whether to auto-approve low-risk operations
         block_high_risk: Whether to auto-block high-risk operations
         record_episodes: Whether to record episodes for learning
+        max_nesting_depth: Maximum depth for nested ReAct loop calls (default 5)
+        event_timeout_seconds: Timeout for processing individual events (default 300)
     """
 
     confidence_threshold: float = 0.7
@@ -208,6 +211,8 @@ class MasterAgentConfig:
     auto_approve_low_risk: bool = True
     block_high_risk: bool = True
     record_episodes: bool = True
+    max_nesting_depth: int = 5
+    event_timeout_seconds: float = 300.0
 
 
 class MasterAgent:
@@ -273,6 +278,9 @@ class MasterAgent:
         self._retry_counts: dict[str, int] = {}
         self._recent_tools: list[str] = []
         self._modified_files: list[str] = []
+        self._current_depth: int = 0
+        self._cancel_event: asyncio.Event | None = None
+        self._pending_state_updates: dict[str, Any] = {}
 
     async def run_session(self, session: ManagedSession) -> None:
         """
@@ -293,21 +301,35 @@ class MasterAgent:
         self._recent_tools = []
         self._modified_files = []
         self._retry_counts.clear()
+        self._current_depth = 0
+        self._cancel_event = asyncio.Event()
+        self._pending_state_updates.clear()
 
         try:
             async for event in self.session_manager.stream_events(session):
-                # THINK: What's happening?
-                analysis = await self._think(event, session)
+                try:
+                    # Apply timeout to event processing
+                    async with asyncio.timeout(self.config.event_timeout_seconds):
+                        # THINK: What's happening?
+                        analysis = await self._think(event, session)
 
-                # ACT: What should we do?
-                action = await self._decide(analysis, session)
+                        # ACT: What should we do?
+                        action = await self._decide(analysis, session)
 
-                # EXECUTE: Perform the action
-                result = await self._execute(action, session)
+                        # EXECUTE: Perform the action
+                        result = await self._execute(action, session)
 
-                # LEARN: Should we remember this?
-                if self.config.record_episodes and analysis.is_novel:
-                    await self._learn(analysis, action, result, session)
+                        # LEARN: Should we remember this?
+                        if self.config.record_episodes and analysis.is_novel:
+                            await self._learn(analysis, action, result, session)
+
+                except TimeoutError:
+                    logger.warning(
+                        "Event processing timed out after %.1f seconds for event type %s",
+                        self.config.event_timeout_seconds,
+                        getattr(event, "type", "unknown"),
+                    )
+                    continue
 
                 # Check for session completion
                 if action.type in (
@@ -322,9 +344,10 @@ class MasterAgent:
 
         except Exception as e:
             logger.exception("MasterAgent error in session %s: %s", session.id, e)
-            # Record error episode
+            # Record error episode with full traceback
             if self.config.record_episodes:
-                await self._record_error_episode(session, str(e))
+                tb = traceback.format_exc()
+                await self._record_error_episode(session, str(e), tb)
             raise
 
         logger.info("MasterAgent finished session: %s", session.id)
@@ -399,20 +422,28 @@ class MasterAgent:
             )
 
     def _analyze_tool_use(self, event: ToolUseEvent, session: ManagedSession) -> Analysis:
-        """Analyze a tool use request."""
-        # Track recent tools for context
-        self._recent_tools.append(event.tool_name)
-        if len(self._recent_tools) > 20:
-            self._recent_tools = self._recent_tools[-20:]
+        """Analyze a tool use request.
 
-        # Track modified files
+        State updates (recent_tools, modified_files) are staged in _pending_state_updates
+        and only applied after successful execution to avoid state mutation during analysis.
+        """
+        # Stage state updates instead of applying immediately
+        pending_tool = event.tool_name
+        pending_file: str | None = None
         if event.tool_name in ("Write", "Edit"):
             file_path = event.tool_input.get("file_path", "")
             if file_path and file_path not in self._modified_files:
-                self._modified_files.append(file_path)
+                pending_file = file_path
 
-        # Determine if novel (first time seeing this pattern)
-        is_novel = event.tool_name not in self._recent_tools[:-1]
+        # Store pending updates to be applied after successful execution
+        self._pending_state_updates = {
+            "tool_name": pending_tool,
+            "file_path": pending_file,
+            "tool_use_id": event.tool_use_id,
+        }
+
+        # Determine if novel based on current state (before pending updates)
+        is_novel = event.tool_name not in self._recent_tools
 
         return Analysis(
             type=AnalysisType.PERMISSION_REQUEST,
@@ -425,6 +456,28 @@ class MasterAgent:
                 "recent_tools": self._recent_tools[-5:],
             },
         )
+
+    def _apply_pending_state_updates(self) -> None:
+        """Apply pending state updates after successful execution."""
+        if not self._pending_state_updates:
+            return
+
+        tool_name = self._pending_state_updates.get("tool_name")
+        file_path = self._pending_state_updates.get("file_path")
+
+        if tool_name:
+            self._recent_tools.append(tool_name)
+            if len(self._recent_tools) > 20:
+                self._recent_tools = self._recent_tools[-20:]
+
+        if file_path:
+            self._modified_files.append(file_path)
+
+        self._pending_state_updates.clear()
+
+    def _clear_pending_state_updates(self) -> None:
+        """Clear pending state updates on failure."""
+        self._pending_state_updates.clear()
 
     async def _analyze_question(self, event: AskQuestionEvent, session: ManagedSession) -> Analysis:
         """Analyze a question event."""
@@ -795,9 +848,7 @@ class MasterAgent:
                     )
                     # Send response through session manager for continuous conversation
                     if action.value:
-                        events_processed = await self._send_question_response(
-                            session, action.value
-                        )
+                        events_processed = await self._send_question_response(session, action.value)
                         result["events_processed"] = events_processed
 
                 case ActionType.ESCALATE_TO_HUMAN:
@@ -809,9 +860,7 @@ class MasterAgent:
                     )
                     # Trigger human intervention if HumanBridge is configured
                     if self.human_bridge:
-                        response = await self._handle_human_escalation(
-                            action, session
-                        )
+                        response = await self._handle_human_escalation(action, session)
                         result["human_response"] = response
 
                 case ActionType.CHECKPOINT_AND_WAIT:
@@ -849,10 +898,16 @@ class MasterAgent:
                 case ActionType.NO_ACTION:
                     result["action"] = "no_action"
 
+            # Apply pending state updates after successful tool approval
+            if result["success"] and action.type == ActionType.APPROVE_TOOL:
+                self._apply_pending_state_updates()
+
         except Exception as e:
             result["success"] = False
             result["error"] = str(e)
             logger.exception("Error executing action %s: %s", action.type.value, e)
+            # Clear pending state updates on failure
+            self._clear_pending_state_updates()
 
         return result
 
@@ -866,6 +921,9 @@ class MasterAgent:
         This enables continuous conversation by sending the answer back
         to Claude and processing the resulting events.
 
+        Uses depth limiting to prevent unbounded recursion when answering
+        questions triggers more questions.
+
         Args:
             session: The session to respond to
             response: The response text
@@ -873,7 +931,16 @@ class MasterAgent:
         Returns:
             Number of events processed
         """
+        # Check nesting depth to prevent unbounded recursion
+        if self._current_depth >= self.config.max_nesting_depth:
+            logger.warning(
+                "Max nesting depth (%d) reached, skipping nested event processing",
+                self.config.max_nesting_depth,
+            )
+            return 0
+
         event_count = 0
+        self._current_depth += 1
         try:
             async for event in self.session_manager.send_response(session.id, response):
                 event_count += 1
@@ -896,6 +963,8 @@ class MasterAgent:
 
         except Exception as e:
             logger.warning("Error processing question response events: %s", e)
+        finally:
+            self._current_depth -= 1
 
         return event_count
 
@@ -904,6 +973,8 @@ class MasterAgent:
 
         For token limits, waits until the actual reset time (can be hours).
         Uses smart sleep intervals to avoid wasting compute power.
+        Supports cancellation via _cancel_event and validates session exists
+        during long waits.
         """
         rate_limit_info: RateLimitInfo | None = action.metadata.get("rate_limit_info")
 
@@ -935,6 +1006,15 @@ class MasterAgent:
                 rate_limit_info.limit_type.value,
             )
 
+        # Progress callback for logging with session validation
+        async def validate_session() -> bool:
+            """Validate that the session still exists."""
+            try:
+                existing_session = self.session_manager.get_session(session.id)
+                return existing_session is not None
+            except Exception:
+                return False
+
         # Progress callback for logging
         def progress_callback(remaining: int, total: int) -> None:
             # Log every 5 minutes for long waits, every 30 seconds for short waits
@@ -947,15 +1027,92 @@ class MasterAgent:
                 if remaining % 30 == 0 or remaining <= 5:
                     logger.info("Rate limit wait: %ds remaining", remaining)
 
-        # Wait for reset using smart intervals
-        await self.rate_monitor.wait_for_reset(
+        # Wait for reset using smart intervals with cancellation support
+        await self._cancellable_rate_limit_wait(
             rate_limit_info,
-            progress_callback=progress_callback,
+            session,
+            progress_callback,
+            validate_session,
         )
 
-    async def _handle_human_escalation(
-        self, action: Action, session: ManagedSession
-    ) -> str | None:
+    async def _cancellable_rate_limit_wait(
+        self,
+        rate_limit_info: RateLimitInfo,
+        session: ManagedSession,
+        progress_callback: Any,
+        validate_session: Any,
+    ) -> None:
+        """Wait for rate limit reset with cancellation and session validation support.
+
+        Args:
+            rate_limit_info: The rate limit information
+            session: The session being waited on
+            progress_callback: Callback for progress updates
+            validate_session: Async function to validate session exists
+        """
+        wait_seconds = self.rate_monitor.get_adjusted_retry_seconds(rate_limit_info)
+        elapsed = 0
+        check_interval = 60  # Check every 60 seconds for long waits
+
+        while elapsed < wait_seconds:
+            # Check for cancellation
+            if self._cancel_event and self._cancel_event.is_set():
+                logger.info("Rate limit wait cancelled for session %s", session.id)
+                raise asyncio.CancelledError("Rate limit wait was cancelled")
+
+            # Validate session still exists every check interval
+            if elapsed > 0 and elapsed % check_interval == 0:
+                if not await validate_session():
+                    logger.warning(
+                        "Session %s no longer exists, aborting rate limit wait", session.id
+                    )
+                    raise RuntimeError(f"Session {session.id} no longer exists")
+
+            # Calculate sleep duration (use smaller intervals for short waits)
+            remaining = wait_seconds - elapsed
+            sleep_time = min(check_interval, remaining, 30 if remaining < 300 else check_interval)
+
+            # Progress callback
+            if progress_callback:
+                progress_callback(int(remaining), int(wait_seconds))
+
+            # Sleep with cancellation support
+            try:
+                if self._cancel_event:
+                    # Wait for either sleep or cancel event
+                    done, pending = await asyncio.wait(
+                        [
+                            asyncio.create_task(asyncio.sleep(sleep_time)),
+                            asyncio.create_task(self._cancel_event.wait()),
+                        ],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    # Cancel pending tasks
+                    for task in pending:
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    # Check if cancelled
+                    if self._cancel_event.is_set():
+                        raise asyncio.CancelledError("Rate limit wait was cancelled")
+                else:
+                    await asyncio.sleep(sleep_time)
+            except asyncio.CancelledError:
+                logger.info("Rate limit wait interrupted for session %s", session.id)
+                raise
+
+            elapsed += sleep_time
+
+        logger.info("Rate limit wait completed for session %s", session.id)
+
+    def cancel_wait(self) -> None:
+        """Cancel any ongoing rate limit wait."""
+        if self._cancel_event:
+            self._cancel_event.set()
+
+    async def _handle_human_escalation(self, action: Action, session: ManagedSession) -> str | None:
         """Handle escalation to human via HumanBridge.
 
         Args:
@@ -990,10 +1147,7 @@ class MasterAgent:
             return await self.human_bridge.escalate_question(
                 session=session,
                 question=metadata.get("question", action.reason or "?"),
-                options=[
-                    opt.get("label", str(opt))
-                    for opt in metadata.get("options", [])
-                ],
+                options=[opt.get("label", str(opt)) for opt in metadata.get("options", [])],
                 suggestion=metadata.get("suggestion") or action.value,
                 confidence=metadata.get("suggestion_confidence", action.confidence),
             )
@@ -1055,8 +1209,20 @@ class MasterAgent:
             episode.outcome,
         )
 
-    async def _record_error_episode(self, session: ManagedSession, error: str) -> None:
-        """Record an error episode."""
+    async def _record_error_episode(
+        self, session: ManagedSession, error: str, stack_trace: str | None = None
+    ) -> None:
+        """Record an error episode with optional stack trace.
+
+        Args:
+            session: The session where the error occurred
+            error: The error message
+            stack_trace: Optional full stack trace for debugging
+        """
+        metadata: dict[str, Any] = {"error": error}
+        if stack_trace:
+            metadata["stack_trace"] = stack_trace
+
         episode = Episode(
             timestamp=datetime.now(),
             session_id=session.id,
@@ -1066,7 +1232,7 @@ class MasterAgent:
             action_reason="Unhandled exception in MasterAgent",
             outcome="failure",
             confidence=0.0,
-            metadata={"error": error},
+            metadata=metadata,
         )
         self._episodes.append(episode)
 

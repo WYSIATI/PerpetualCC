@@ -288,9 +288,7 @@ class TestMasterAgentThink:
         )
 
     @pytest.mark.asyncio
-    async def test_think_tool_use_read(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_tool_use_read(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze Read tool use."""
         event = ToolUseEvent(
             tool_use_id="tool-001",
@@ -304,9 +302,7 @@ class TestMasterAgentThink:
         assert analysis.tool_input == {"file_path": "/src/main.py"}
 
     @pytest.mark.asyncio
-    async def test_think_tool_use_bash(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_tool_use_bash(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze Bash tool use."""
         event = ToolUseEvent(
             tool_use_id="tool-002",
@@ -323,7 +319,11 @@ class TestMasterAgentThink:
     async def test_think_tool_use_tracks_recent(
         self, master_agent: MasterAgent, session: ManagedSession
     ):
-        """_think should track recent tools."""
+        """_think should stage recent tools for later application.
+
+        Note: With the state mutation timing fix (Phase 5), state is now staged
+        during _think and only applied after successful execution via _execute.
+        """
         events = [
             ToolUseEvent(tool_use_id="1", tool_name="Read", tool_input={}),
             ToolUseEvent(tool_use_id="2", tool_name="Edit", tool_input={}),
@@ -332,6 +332,8 @@ class TestMasterAgentThink:
 
         for event in events:
             await master_agent._think(event, session)
+            # Simulate successful execution which applies staged updates
+            master_agent._apply_pending_state_updates()
 
         assert "Read" in master_agent._recent_tools
         assert "Edit" in master_agent._recent_tools
@@ -341,7 +343,11 @@ class TestMasterAgentThink:
     async def test_think_tool_use_tracks_modified_files(
         self, master_agent: MasterAgent, session: ManagedSession
     ):
-        """_think should track modified files."""
+        """_think should stage modified files for later application.
+
+        Note: With the state mutation timing fix (Phase 5), state is now staged
+        during _think and only applied after successful execution via _execute.
+        """
         events = [
             ToolUseEvent(
                 tool_use_id="1",
@@ -357,14 +363,14 @@ class TestMasterAgentThink:
 
         for event in events:
             await master_agent._think(event, session)
+            # Simulate successful execution which applies staged updates
+            master_agent._apply_pending_state_updates()
 
         assert "/src/new.py" in master_agent._modified_files
         assert "/src/existing.py" in master_agent._modified_files
 
     @pytest.mark.asyncio
-    async def test_think_question(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_question(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze question events."""
         event = AskQuestionEvent(
             tool_use_id="q-001",
@@ -385,9 +391,7 @@ class TestMasterAgentThink:
         assert len(analysis.question_options) == 2
 
     @pytest.mark.asyncio
-    async def test_think_rate_limit(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_rate_limit(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze rate limit events."""
         event = RateLimitEvent(
             retry_after=60,
@@ -399,9 +403,7 @@ class TestMasterAgentThink:
         assert analysis.is_novel is True
 
     @pytest.mark.asyncio
-    async def test_think_result_success(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_result_success(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze successful result events."""
         event = ResultEvent(
             is_error=False,
@@ -415,9 +417,7 @@ class TestMasterAgentThink:
         assert analysis.is_error is False
 
     @pytest.mark.asyncio
-    async def test_think_result_error(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_result_error(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze error result events."""
         event = ResultEvent(
             is_error=True,
@@ -444,9 +444,7 @@ class TestMasterAgentThink:
         assert analysis.type == AnalysisType.RATE_LIMIT
 
     @pytest.mark.asyncio
-    async def test_think_init_event(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_init_event(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze init events."""
         event = InitEvent(session_id="claude-session-123")
         analysis = await master_agent._think(event, session)
@@ -455,9 +453,7 @@ class TestMasterAgentThink:
         assert analysis.context["session_id"] == "claude-session-123"
 
     @pytest.mark.asyncio
-    async def test_think_text_event(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_text_event(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze text output events."""
         event = TextEvent(text="I'll start by reading the code...")
         analysis = await master_agent._think(event, session)
@@ -465,9 +461,7 @@ class TestMasterAgentThink:
         assert analysis.type == AnalysisType.TEXT_OUTPUT
 
     @pytest.mark.asyncio
-    async def test_think_thinking_event(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_think_thinking_event(self, master_agent: MasterAgent, session: ManagedSession):
         """_think should analyze thinking events."""
         event = ThinkingEvent(thinking="Let me analyze the requirements...")
         analysis = await master_agent._think(event, session)
@@ -609,9 +603,7 @@ class TestMasterAgentDecide:
         assert action.type == ActionType.ESCALATE_TO_HUMAN
 
     @pytest.mark.asyncio
-    async def test_decide_rate_limit(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_decide_rate_limit(self, master_agent: MasterAgent, session: ManagedSession):
         """_decide should handle rate limits."""
         info = RateLimitInfo(
             detected_at=datetime.now(),
@@ -739,9 +731,7 @@ class TestMasterAgentExecute:
         return ManagedSession.create(project_path=temp_dir, task="Test")
 
     @pytest.mark.asyncio
-    async def test_execute_approve_tool(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_execute_approve_tool(self, master_agent: MasterAgent, session: ManagedSession):
         """_execute should handle tool approval."""
         action = Action(
             type=ActionType.APPROVE_TOOL,
@@ -755,9 +745,7 @@ class TestMasterAgentExecute:
         assert result["action"] == "tool_approved"
 
     @pytest.mark.asyncio
-    async def test_execute_deny_tool(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_execute_deny_tool(self, master_agent: MasterAgent, session: ManagedSession):
         """_execute should handle tool denial."""
         action = Action(
             type=ActionType.DENY_TOOL,
@@ -789,9 +777,7 @@ class TestMasterAgentExecute:
         assert result["answer"] == "Yes"
 
     @pytest.mark.asyncio
-    async def test_execute_escalate(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_execute_escalate(self, master_agent: MasterAgent, session: ManagedSession):
         """_execute should handle escalation."""
         action = Action(
             type=ActionType.ESCALATE_TO_HUMAN,
@@ -819,9 +805,7 @@ class TestMasterAgentExecute:
         assert result["action"] == "session_completed"
 
     @pytest.mark.asyncio
-    async def test_execute_session_error(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_execute_session_error(self, master_agent: MasterAgent, session: ManagedSession):
         """_execute should handle session errors."""
         action = Action(
             type=ActionType.SESSION_ERROR,
@@ -834,9 +818,7 @@ class TestMasterAgentExecute:
         assert result["action"] == "session_error"
 
     @pytest.mark.asyncio
-    async def test_execute_no_action(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_execute_no_action(self, master_agent: MasterAgent, session: ManagedSession):
         """_execute should handle no-action."""
         action = Action(type=ActionType.NO_ACTION, reason="Passive event")
         result = await master_agent._execute(action, session)
@@ -868,9 +850,7 @@ class TestMasterAgentLearn:
         return ManagedSession.create(project_path=temp_dir, task="Test")
 
     @pytest.mark.asyncio
-    async def test_learn_records_episode(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_learn_records_episode(self, master_agent: MasterAgent, session: ManagedSession):
         """_learn should record episodes."""
         analysis = Analysis(
             type=AnalysisType.PERMISSION_REQUEST,
@@ -894,9 +874,7 @@ class TestMasterAgentLearn:
         assert episodes[0].outcome == "success"
 
     @pytest.mark.asyncio
-    async def test_learn_limits_episodes(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_learn_limits_episodes(self, master_agent: MasterAgent, session: ManagedSession):
         """_learn should limit stored episodes."""
         # Record many episodes
         for i in range(150):
@@ -913,9 +891,7 @@ class TestMasterAgentLearn:
         assert len(episodes) <= 100
 
     @pytest.mark.asyncio
-    async def test_learn_with_memory_store(
-        self, temp_dir: Path, session: ManagedSession
-    ):
+    async def test_learn_with_memory_store(self, temp_dir: Path, session: ManagedSession):
         """_learn should use memory store if available."""
         mock_memory = AsyncMock()
 
@@ -962,9 +938,7 @@ class TestMasterAgentStatistics:
         return ManagedSession.create(project_path=temp_dir, task="Test")
 
     @pytest.mark.asyncio
-    async def test_get_statistics(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_get_statistics(self, master_agent: MasterAgent, session: ManagedSession):
         """get_statistics should return agent stats."""
         # Record some episodes
         for action_type in [ActionType.APPROVE_TOOL, ActionType.DENY_TOOL, ActionType.APPROVE_TOOL]:
@@ -1077,9 +1051,7 @@ class TestMasterAgentRealWorldScenarios:
             assert action.type == ActionType.APPROVE_TOOL
 
     @pytest.mark.asyncio
-    async def test_scenario_running_tests(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_scenario_running_tests(self, master_agent: MasterAgent, session: ManagedSession):
         """Scenario: Claude runs tests after writing code."""
         events = [
             ToolUseEvent(
@@ -1188,9 +1160,7 @@ class TestMasterAgentRealWorldScenarios:
             assert action.value == expected, f"Failed for: {q}"
 
     @pytest.mark.asyncio
-    async def test_scenario_git_workflow(
-        self, master_agent: MasterAgent, session: ManagedSession
-    ):
+    async def test_scenario_git_workflow(self, master_agent: MasterAgent, session: ManagedSession):
         """Scenario: Claude performs git operations.
 
         Note: Git commands are classified as MEDIUM risk by risk_classifier,
@@ -1437,3 +1407,346 @@ class TestMasterAgentIntegration:
         # Statistics tracking works
         assert "total_episodes" in stats
         assert "action_counts" in stats
+
+
+class TestMasterAgentNestedLoopDepthLimiting:
+    """Tests for nested loop depth limiting (Phase 1 improvement)."""
+
+    @pytest.fixture
+    def temp_dir(self) -> Path:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    @pytest.fixture
+    def session_manager(self, temp_dir: Path) -> SessionManager:
+        config = SessionManagerConfig(data_dir=temp_dir)
+        return SessionManager(config)
+
+    @pytest.fixture
+    def session(self, temp_dir: Path) -> ManagedSession:
+        return ManagedSession.create(project_path=temp_dir, task="Test")
+
+    @pytest.mark.asyncio
+    async def test_config_has_max_nesting_depth(self):
+        """Config should have max_nesting_depth attribute."""
+        config = MasterAgentConfig()
+        assert hasattr(config, "max_nesting_depth")
+        assert config.max_nesting_depth == 5
+
+    @pytest.mark.asyncio
+    async def test_custom_nesting_depth(self):
+        """Config should accept custom max_nesting_depth."""
+        config = MasterAgentConfig(max_nesting_depth=10)
+        assert config.max_nesting_depth == 10
+
+    @pytest.mark.asyncio
+    async def test_nested_depth_tracking(self, session_manager: SessionManager, temp_dir: Path):
+        """MasterAgent should track current nesting depth."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+        assert agent._current_depth == 0
+
+    @pytest.mark.asyncio
+    async def test_max_depth_prevents_recursion(
+        self, session_manager: SessionManager, temp_dir: Path, session: ManagedSession
+    ):
+        """_send_question_response should return 0 when max depth reached."""
+        config = MasterAgentConfig(max_nesting_depth=2)
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+            config=config,
+        )
+        # Simulate being at max depth
+        agent._current_depth = 2
+
+        # Should return 0 and not process
+        result = await agent._send_question_response(session, "test response")
+        assert result == 0
+
+
+class TestMasterAgentEventTimeout:
+    """Tests for event processing timeout (Phase 2 improvement)."""
+
+    @pytest.mark.asyncio
+    async def test_config_has_event_timeout(self):
+        """Config should have event_timeout_seconds attribute."""
+        config = MasterAgentConfig()
+        assert hasattr(config, "event_timeout_seconds")
+        assert config.event_timeout_seconds == 300.0
+
+    @pytest.mark.asyncio
+    async def test_custom_event_timeout(self):
+        """Config should accept custom event_timeout_seconds."""
+        config = MasterAgentConfig(event_timeout_seconds=60.0)
+        assert config.event_timeout_seconds == 60.0
+
+
+class TestMasterAgentCancellableWait:
+    """Tests for cancellable rate limit wait (Phase 3 improvement)."""
+
+    @pytest.fixture
+    def temp_dir(self) -> Path:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    @pytest.fixture
+    def session_manager(self, temp_dir: Path) -> SessionManager:
+        config = SessionManagerConfig(data_dir=temp_dir)
+        return SessionManager(config)
+
+    @pytest.fixture
+    def session(self, temp_dir: Path) -> ManagedSession:
+        return ManagedSession.create(project_path=temp_dir, task="Test")
+
+    @pytest.mark.asyncio
+    async def test_cancel_event_initialized(self, session_manager: SessionManager, temp_dir: Path):
+        """MasterAgent should have _cancel_event attribute."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+        assert agent._cancel_event is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_wait_method_exists(self, session_manager: SessionManager, temp_dir: Path):
+        """MasterAgent should have cancel_wait method."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+        assert hasattr(agent, "cancel_wait")
+        assert callable(agent.cancel_wait)
+
+    @pytest.mark.asyncio
+    async def test_cancel_wait_sets_event(self, session_manager: SessionManager, temp_dir: Path):
+        """cancel_wait should set the cancel event."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+        agent._cancel_event = asyncio.Event()
+        agent.cancel_wait()
+        assert agent._cancel_event.is_set()
+
+
+class TestMasterAgentErrorEpisodeWithStackTrace:
+    """Tests for error episode recording with stack trace (Phase 4 improvement)."""
+
+    @pytest.fixture
+    def temp_dir(self) -> Path:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    @pytest.fixture
+    def session_manager(self, temp_dir: Path) -> SessionManager:
+        config = SessionManagerConfig(data_dir=temp_dir)
+        return SessionManager(config)
+
+    @pytest.fixture
+    def session(self, temp_dir: Path) -> ManagedSession:
+        return ManagedSession.create(project_path=temp_dir, task="Test")
+
+    @pytest.mark.asyncio
+    async def test_error_episode_without_stack_trace(
+        self, session_manager: SessionManager, temp_dir: Path, session: ManagedSession
+    ):
+        """_record_error_episode should work without stack trace."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+        await agent._record_error_episode(session, "Test error")
+
+        episodes = agent.get_recent_episodes()
+        assert len(episodes) == 1
+        assert episodes[0].metadata["error"] == "Test error"
+        assert "stack_trace" not in episodes[0].metadata
+
+    @pytest.mark.asyncio
+    async def test_error_episode_with_stack_trace(
+        self, session_manager: SessionManager, temp_dir: Path, session: ManagedSession
+    ):
+        """_record_error_episode should include stack trace when provided."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+        stack_trace = "Traceback (most recent call last):\n  File test.py\nError: test"
+        await agent._record_error_episode(session, "Test error", stack_trace)
+
+        episodes = agent.get_recent_episodes()
+        assert len(episodes) == 1
+        assert episodes[0].metadata["error"] == "Test error"
+        assert episodes[0].metadata["stack_trace"] == stack_trace
+
+
+class TestMasterAgentStateMutationTiming:
+    """Tests for state mutation timing fix (Phase 5 improvement)."""
+
+    @pytest.fixture
+    def temp_dir(self) -> Path:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    @pytest.fixture
+    def session_manager(self, temp_dir: Path) -> SessionManager:
+        config = SessionManagerConfig(data_dir=temp_dir)
+        return SessionManager(config)
+
+    @pytest.fixture
+    def session(self, temp_dir: Path) -> ManagedSession:
+        return ManagedSession.create(project_path=temp_dir, task="Test")
+
+    @pytest.mark.asyncio
+    async def test_pending_state_updates_initialized(
+        self, session_manager: SessionManager, temp_dir: Path
+    ):
+        """MasterAgent should have _pending_state_updates attribute."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+        assert hasattr(agent, "_pending_state_updates")
+        assert agent._pending_state_updates == {}
+
+    @pytest.mark.asyncio
+    async def test_analyze_tool_use_stages_updates(
+        self, session_manager: SessionManager, temp_dir: Path, session: ManagedSession
+    ):
+        """_analyze_tool_use should stage state updates instead of applying."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+
+        # Clear any existing state
+        agent._recent_tools = []
+        agent._modified_files = []
+
+        event = ToolUseEvent(
+            tool_use_id="tool-001",
+            tool_name="Write",
+            tool_input={"file_path": "/src/test.py"},
+        )
+
+        # Analyze the event
+        analysis = agent._analyze_tool_use(event, session)
+
+        # State should NOT be mutated yet
+        assert "Write" not in agent._recent_tools
+        assert "/src/test.py" not in agent._modified_files
+
+        # But pending updates should be staged
+        assert agent._pending_state_updates.get("tool_name") == "Write"
+        assert agent._pending_state_updates.get("file_path") == "/src/test.py"
+
+    @pytest.mark.asyncio
+    async def test_apply_pending_state_updates(
+        self, session_manager: SessionManager, temp_dir: Path
+    ):
+        """_apply_pending_state_updates should apply staged updates."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+
+        # Stage some updates
+        agent._pending_state_updates = {
+            "tool_name": "Edit",
+            "file_path": "/src/app.py",
+        }
+
+        # Apply the updates
+        agent._apply_pending_state_updates()
+
+        # State should now be updated
+        assert "Edit" in agent._recent_tools
+        assert "/src/app.py" in agent._modified_files
+
+        # Pending updates should be cleared
+        assert agent._pending_state_updates == {}
+
+    @pytest.mark.asyncio
+    async def test_clear_pending_state_updates(
+        self, session_manager: SessionManager, temp_dir: Path
+    ):
+        """_clear_pending_state_updates should clear staged updates."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+
+        # Stage some updates
+        agent._pending_state_updates = {
+            "tool_name": "Bash",
+            "file_path": None,
+        }
+
+        # Clear the updates
+        agent._clear_pending_state_updates()
+
+        # Pending updates should be cleared
+        assert agent._pending_state_updates == {}
+
+    @pytest.mark.asyncio
+    async def test_execute_applies_updates_on_success(
+        self, session_manager: SessionManager, temp_dir: Path, session: ManagedSession
+    ):
+        """_execute should apply pending updates after successful tool approval."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+
+        # Stage some updates
+        agent._pending_state_updates = {
+            "tool_name": "Read",
+            "file_path": None,
+        }
+
+        action = Action(
+            type=ActionType.APPROVE_TOOL,
+            reason="Safe",
+            metadata={"tool_name": "Read"},
+        )
+
+        result = await agent._execute(action, session)
+
+        assert result["success"] is True
+        assert "Read" in agent._recent_tools
+        assert agent._pending_state_updates == {}
+
+    @pytest.mark.asyncio
+    async def test_state_not_mutated_on_deny(
+        self, session_manager: SessionManager, temp_dir: Path, session: ManagedSession
+    ):
+        """State should not be mutated when tool is denied."""
+        agent = MasterAgent(
+            session_manager=session_manager,
+            decision_engine=DecisionEngine(project_path=temp_dir),
+        )
+
+        # Clear state
+        agent._recent_tools = []
+        agent._modified_files = []
+
+        # Stage some updates (simulating what _analyze_tool_use does)
+        agent._pending_state_updates = {
+            "tool_name": "Bash",
+            "file_path": None,
+        }
+
+        action = Action(
+            type=ActionType.DENY_TOOL,
+            value="Dangerous operation",
+            metadata={"tool_name": "Bash"},
+        )
+
+        result = await agent._execute(action, session)
+
+        assert result["success"] is True
+        # State should NOT be updated on deny (pending updates still there)
+        assert "Bash" not in agent._recent_tools
