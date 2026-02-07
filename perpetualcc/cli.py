@@ -563,18 +563,18 @@ def start(
         resolve_path=True,
         metavar="PATH",
     ),
-    task: str = typer.Option(
+    task: list[str] | None = typer.Option(
         None,
         "--task",
         "-t",
-        help='What you want Claude to do. Example: -t "Fix the login bug"',
+        help='What you want Claude to do. Can specify multiple: -t "Task 1" -t "Task 2"',
         metavar="DESCRIPTION",
     ),
-    requirements: Path | None = typer.Option(
+    tasks_file: list[Path] | None = typer.Option(
         None,
-        "--requirements",
-        "-r",
-        help="Load task from a file instead of -t. Example: -r spec.md",
+        "--tasks-file",
+        "-f",
+        help="Load tasks from file(s). Can specify multiple: -f reqs1.md -f reqs2.md",
         exists=True,
         dir_okay=False,
         metavar="FILE",
@@ -603,6 +603,16 @@ def start(
         "-v",
         help="Verbose output - show file contents, diffs, full tool output",
     ),
+    plan_first: bool = typer.Option(
+        False,
+        "--plan-first",
+        help="Run planning session first, review with Brain before execution",
+    ),
+    human_review: bool = typer.Option(
+        False,
+        "--human-review",
+        help="Force human review for each plan iteration (requires --plan-first)",
+    ),
 ) -> None:
     """
     Start a new Claude Code session.
@@ -615,17 +625,21 @@ def start(
       [dim]# Simple task - just tell Claude what to do[/]
       pcc start ./myapp -t "Add a dark mode toggle"
 
-      [dim]# Use a requirements file for complex tasks[/]
-      pcc start ./myapp -r requirements.md
+      [dim]# Multiple tasks - runs concurrently[/]
+      pcc start ./myapp -t "Add tests" -t "Fix bug #123"
 
-      [dim]# Use current directory[/]
-      pcc start . -t "Code review"
+      [dim]# Use requirements files[/]
+      pcc start ./myapp -f requirements.md
+      pcc start ./myapp -f reqs1.md -f reqs2.md
+
+      [dim]# Mix inline tasks and files[/]
+      pcc start ./myapp -t "Code review" -f bugfixes.md
 
     [bold yellow]Tips:[/]
 
       - Use [bold].[/] for current directory: pcc start . -t "..."
       - Press [bold]Ctrl+C[/] to pause or stop the session
-      - Tasks can be short or detailed - Claude adapts
+      - Multiple tasks run as separate sessions
     """
     # Ensure config file exists (auto-init on first run)
     _ensure_config_exists()
@@ -642,33 +656,96 @@ def start(
         console.print(f"[red]Error:[/red] Path exists but is not a directory: {project_path}")
         raise typer.Exit(1)
 
-    # Resolve task from options
-    if task is None and requirements is None:
-        console.print("[red]Error:[/red] Either --task or --requirements must be provided.")
+    # Collect all tasks from options
+    all_tasks: list[str] = []
+    
+    # Add inline tasks
+    if task:
+        all_tasks.extend(task)
+    
+    # Add tasks from files
+    if tasks_file:
+        for file_path in tasks_file:
+            try:
+                file_content = file_path.read_text().strip()
+                if file_content:
+                    all_tasks.append(file_content)
+            except OSError as e:
+                console.print(f"[red]Error reading {file_path}:[/red] {e}")
+                raise typer.Exit(1)
+    
+    if not all_tasks:
+        console.print("[red]Error:[/red] Either --task or --tasks-file must be provided.")
         raise typer.Exit(1)
-
-    resolved_task = task or ""
-    if requirements:
-        req_text = requirements.read_text()
-        if resolved_task:
-            resolved_task = f"{resolved_task}\n\nRequirements:\n{req_text}"
-        else:
-            resolved_task = req_text
 
     # Validate quiet and verbose are mutually exclusive
     if quiet and verbose:
         console.print("[red]Error:[/red] --quiet and --verbose cannot be used together.")
         raise typer.Exit(1)
 
+    # Validate --human-review requires --plan-first
+    if human_review and not plan_first:
+        console.print("[red]Error:[/red] --human-review requires --plan-first flag.")
+        raise typer.Exit(1)
+
     try:
         if simple:
             # Simple mode: no pause/resume, no session management
-            asyncio.run(_run_session(project_path, resolved_task, model, None, quiet, verbose))
+            # Run all tasks sequentially in simple mode
+            for task_desc in all_tasks:
+                asyncio.run(_run_session(project_path, task_desc, model, None, quiet, verbose))
         else:
             # Default: managed mode with pause/resume and session tracking
             manager = _get_session_manager()
-            session = asyncio.run(manager.create_session(project_path, resolved_task))
-            asyncio.run(_run_managed_session(session, quiet, verbose))
+            
+            if len(all_tasks) == 1:
+                # Single task: run with interactive mode
+                session = asyncio.run(manager.create_session(project_path, all_tasks[0]))
+                asyncio.run(_run_managed_session(session, quiet, verbose))
+            else:
+                # Multiple tasks: create sessions and run concurrently
+                console.print(f"[bold]Starting {len(all_tasks)} sessions...[/bold]")
+                
+                async def run_multiple_sessions():
+                    # Create all sessions first
+                    sessions = []
+                    for i, task_desc in enumerate(all_tasks, 1):
+                        session = await manager.create_session(project_path, task_desc)
+                        sessions.append(session)
+                        console.print(f"  [{i}/{len(all_tasks)}] Created session {session.id[:8]}")
+                    
+                    # Run sessions concurrently (without interactive signal handling)
+                    console.print("[bold]Running sessions...[/bold]")
+                    for session in sessions:
+                        await manager.start_session(session.id)
+                    
+                    # Wait for all sessions to complete
+                    while True:
+                        all_done = True
+                        for session in sessions:
+                            updated = manager.get_session(session.id)
+                            if updated and not updated.is_completed:
+                                all_done = False
+                                break
+                        if all_done:
+                            break
+                        await asyncio.sleep(0.5)
+                    
+                    # Show summary for all sessions
+                    console.print("\n[bold]Session Summary:[/bold]")
+                    for session in sessions:
+                        updated = manager.get_session(session.id)
+                        if updated:
+                            is_done = updated.status == SessionStatus.COMPLETED
+                            status_color = "green" if is_done else "red"
+                            task_preview = session.current_task[:40]
+                            console.print(
+                                f"  {session.id[:8]}: "
+                                f"[{status_color}]{updated.status.value}[/{status_color}] "
+                                f"- {task_preview}..."
+                            )
+                
+                asyncio.run(run_multiple_sessions())
     except KeyboardInterrupt:
         console.print("\n[yellow]Exiting.[/yellow]")
 

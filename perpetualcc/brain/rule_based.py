@@ -11,6 +11,7 @@ from perpetualcc.brain.base import (
     BrainAnswer,
     PermissionContext,
     PermissionDecision,
+    PlanReviewResult,
     QuestionContext,
 )
 
@@ -402,3 +403,49 @@ class RuleBasedBrain(Brain):
     def get_confidence_threshold(self) -> float:
         """Get the minimum confidence threshold for auto-answering."""
         return self._config.confidence_threshold
+
+    async def review_plan(
+        self,
+        plan_content: str,
+        original_task: str,
+        context: QuestionContext,
+    ) -> PlanReviewResult:
+        """
+        Review a plan using rule-based heuristics.
+
+        Heuristics:
+        - Plan too short (< 100 chars) -> iterate
+        - Missing key indicators -> iterate
+        - Otherwise -> execute with moderate confidence
+        """
+        # Check plan length
+        if len(plan_content.strip()) < 100:
+            return PlanReviewResult(
+                decision="iterate",
+                feedback="Plan is too short. Please provide more detail.",
+                confidence=0.8,
+            )
+
+        # Check for key plan indicators (steps, actions, etc.)
+        plan_lower = plan_content.lower()
+        key_indicators = [
+            "step", "first", "then", "next", "finally",
+            "1.", "2.", "3.",
+            "- ", "* ",
+            "will", "should", "need to",
+        ]
+        indicator_count = sum(1 for ind in key_indicators if ind in plan_lower)
+
+        if indicator_count < 2:
+            return PlanReviewResult(
+                decision="iterate",
+                feedback="Plan lacks clear structure. Add numbered steps or action items.",
+                confidence=0.7,
+            )
+
+        # Plan looks reasonable - approve execution
+        return PlanReviewResult(
+            decision="execute",
+            feedback="Plan appears complete and well-structured.",
+            confidence=0.75,
+        )

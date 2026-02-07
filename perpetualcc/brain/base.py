@@ -51,6 +51,20 @@ class PermissionDecision:
     requires_human: bool = False
 
 
+@dataclass(frozen=True)
+class PlanReviewResult:
+    """Result of a plan review by the brain.
+    
+    The brain reviews the output of a planning session and decides:
+    - iterate: Plan needs refinement, run another planning session
+    - execute: Plan is ready, proceed with execution
+    """
+
+    decision: str  # "iterate" | "execute"
+    feedback: str  # Explanation or improvement suggestions
+    confidence: float  # 0.0 - 1.0
+
+
 class Brain(ABC):
     """
     Abstract base class for brain implementations.
@@ -105,6 +119,30 @@ class Brain(ABC):
 
         Returns:
             PermissionDecision indicating whether to approve
+        """
+        ...
+
+    @abstractmethod
+    async def review_plan(
+        self,
+        plan_content: str,
+        original_task: str,
+        context: QuestionContext,
+    ) -> PlanReviewResult:
+        """
+        Review the output of a planning session.
+
+        Called after a planning session completes to decide whether to:
+        - iterate: Run another planning session to refine the plan
+        - execute: Proceed with executing the plan
+
+        Args:
+            plan_content: The plan output from Claude Code
+            original_task: The original task description
+            context: Session and project context
+
+        Returns:
+            PlanReviewResult with decision, feedback, and confidence
         """
         ...
 
