@@ -85,6 +85,79 @@ from perpetualcc.memory.store import (
     StoredProcedure,
 )
 
+
+class MasterAgentMemoryAdapter:
+    """Adapter to connect memory systems to MasterAgent.
+
+    This adapter implements the MemoryStore protocol expected by MasterAgent,
+    bridging to the actual EpisodicMemory implementation.
+
+    Usage:
+        store = MemoryStore()
+        await store.initialize()
+        episodic = EpisodicMemory(store)
+        adapter = MasterAgentMemoryAdapter(episodic)
+        # Pass adapter to MasterAgent as memory parameter
+    """
+
+    def __init__(self, episodic_memory: EpisodicMemory):
+        """Initialize the adapter.
+
+        Args:
+            episodic_memory: The EpisodicMemory instance to use
+        """
+        self.episodic = episodic_memory
+
+    async def record_episode(self, episode) -> None:
+        """Record an episode for future learning.
+
+        Converts the MasterAgent Episode to memory Episode format.
+
+        Args:
+            episode: Episode from master_agent.Episode
+        """
+        # The episode from MasterAgent has the same structure
+        memory_episode = Episode(
+            timestamp=episode.timestamp,
+            session_id=episode.session_id,
+            event_type=episode.event_type,
+            context=episode.context,
+            action_taken=episode.action_taken,
+            action_reason=episode.action_reason,
+            outcome=episode.outcome,
+            confidence=episode.confidence,
+            metadata=episode.metadata,
+        )
+        await self.episodic.record(memory_episode)
+
+    async def find_similar(self, context: str, top_k: int = 3):
+        """Find similar past episodes.
+
+        Args:
+            context: The context to search for
+            top_k: Number of results to return
+
+        Returns:
+            List of similar episodes
+        """
+        similar = await self.episodic.find_similar(context, top_k=top_k)
+        # Convert to format expected by MasterAgent
+        return [
+            Episode(
+                timestamp=s.episode.timestamp,
+                session_id=s.episode.session_id,
+                event_type=s.episode.event_type,
+                context=s.episode.context,
+                action_taken=s.episode.action_taken,
+                action_reason=s.episode.action_reason,
+                outcome=s.episode.outcome,
+                confidence=s.episode.confidence,
+                metadata=s.episode.metadata,
+            )
+            for s in similar
+        ]
+
+
 __all__ = [
     # Store
     "MemoryStore",
@@ -110,4 +183,6 @@ __all__ = [
     "FactCategory",
     "SemanticMemory",
     "SemanticMemoryConfig",
+    # Adapter
+    "MasterAgentMemoryAdapter",
 ]

@@ -169,6 +169,18 @@ class GeminiBrain(Brain):
                 for opt in options
             )
 
+            # Build RAG context if available
+            rag_text = ""
+            if context.rag_context:
+                rag_snippets = []
+                for result in context.rag_context[:3]:  # Top 3 most relevant
+                    file_path = result.get("file_path", "unknown")
+                    content = result.get("content", "")[:500]
+                    name = result.get("name", "")
+                    rag_snippets.append(f"# {file_path} ({name})\n{content}")
+                if rag_snippets:
+                    rag_text = "\n\nRelevant code context:\n" + "\n---\n".join(rag_snippets)
+
             user_prompt = f"""Project: {context.project_path}
 Current Task: {context.current_task or 'Not specified'}
 
@@ -177,7 +189,7 @@ Question: {question}
 Available options:
 {options_text if options else 'No specific options provided - answer freely'}
 
-{f'Requirements context: {context.requirements_text[:500]}...' if context.requirements_text else ''}
+{f'Requirements context: {context.requirements_text[:500]}...' if context.requirements_text else ''}{rag_text}
 
 Please analyze this question and provide your response."""
 
@@ -231,6 +243,18 @@ Please analyze this question and provide your response."""
             # Build the prompt
             input_summary = self._format_tool_input(tool_name, tool_input)
 
+            # Build RAG context if available
+            rag_text = ""
+            if context.rag_context:
+                rag_snippets = []
+                for result in context.rag_context[:2]:  # Top 2 most relevant for permissions
+                    file_path = result.get("file_path", "unknown")
+                    name = result.get("name", "")
+                    docstring = result.get("docstring", "")
+                    rag_snippets.append(f"  - {file_path}: {name} - {docstring[:100]}")
+                if rag_snippets:
+                    rag_text = "\nRelevant code context:\n" + "\n".join(rag_snippets)
+
             user_prompt = f"""Project: {context.project_path}
 Current Task: {context.current_task or 'Not specified'}
 
@@ -238,7 +262,7 @@ Tool: {tool_name}
 Input: {input_summary}
 
 Recent tools used: {', '.join(context.recent_tools[-5:]) if context.recent_tools else 'None'}
-Recently modified files: {', '.join(context.modified_files[-5:]) if context.modified_files else 'None'}
+Recently modified files: {', '.join(context.modified_files[-5:]) if context.modified_files else 'None'}{rag_text}
 
 Please evaluate whether to approve this tool use."""
 

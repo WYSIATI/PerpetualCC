@@ -621,6 +621,16 @@ class MasterAgent:
         tool_name = analysis.tool_name or ""
         tool_input = analysis.tool_input or {}
 
+        # Retrieve RAG context if knowledge engine is available
+        rag_context: list[dict[str, Any]] = []
+        if self.knowledge_engine and tool_name in ("Write", "Edit"):
+            try:
+                file_path = tool_input.get("file_path", "")
+                if file_path:
+                    rag_context = await self.knowledge_engine.retrieve(file_path, top_k=3)
+            except Exception as e:
+                logger.debug("Failed to retrieve RAG context for permission: %s", e)
+
         # Build permission context
         context = PermissionContext(
             project_path=session.project_path,
@@ -628,6 +638,7 @@ class MasterAgent:
             session_id=session.id,
             recent_tools=self._recent_tools[-10:],
             modified_files=self._modified_files[-20:],
+            rag_context=rag_context,
         )
 
         # Use async decision engine with brain support
@@ -686,6 +697,9 @@ class MasterAgent:
                 },
             )
 
+        # Get RAG context from analysis or retrieve if not already present
+        rag_context = analysis.context.get("rag_context", [])
+
         # Build question context
         context = QuestionContext(
             project_path=session.project_path,
@@ -693,6 +707,7 @@ class MasterAgent:
             options=analysis.question_options,
             current_task=session.current_task,
             session_id=session.id,
+            rag_context=rag_context,
         )
 
         # Get answer from brain

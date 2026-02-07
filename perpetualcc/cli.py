@@ -1841,6 +1841,318 @@ def config_set(
         raise typer.Exit(1)
 
 
+@app.command(name="init")
+def init_project(
+    project_path: Path = typer.Argument(
+        ...,
+        help="Project folder to index",
+        file_okay=False,
+        resolve_path=True,
+        metavar="PATH",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Force reindex even if already indexed",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show detailed progress during indexing",
+    ),
+) -> None:
+    """
+    Initialize a project for RAG-powered code understanding.
+
+    Scans the codebase, extracts code chunks, and creates embeddings
+    for semantic search. This enables Claude to better understand your
+    project structure and provide context-aware answers.
+
+    [bold yellow]Examples:[/]
+
+      [dim]# Index current directory[/]
+      pcc init .
+
+      [dim]# Index a specific project[/]
+      pcc init ./my-project
+
+      [dim]# Force reindex (useful after major changes)[/]
+      pcc init ./my-project --force
+
+    [bold yellow]Notes:[/]
+      - Creates .perpetualcc/ folder in the project for local data
+      - Indexes Python, JavaScript, TypeScript, and other common languages
+      - Subsequent runs will only reindex if files have changed
+    """
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+    )
+
+    if not project_path.exists():
+        console.print(f"[red]Error:[/red] Path does not exist: {project_path}")
+        raise typer.Exit(1)
+
+    if not project_path.is_dir():
+        console.print(f"[red]Error:[/red] Path is not a directory: {project_path}")
+        raise typer.Exit(1)
+
+    async def _index():
+        try:
+            from perpetualcc.knowledge import KnowledgeEngine
+        except ImportError:
+            console.print(
+                "[red]Error:[/red] Knowledge engine dependencies not installed.\n"
+                "Install with: pip install perpetualcc[knowledge]"
+            )
+            raise typer.Exit(1)
+
+        console.print(f"[bold]Indexing project:[/bold] {project_path}")
+        console.print()
+
+        engine = KnowledgeEngine(project_path)
+
+        # Progress tracking
+        progress_task = None
+        last_file = ""
+
+        def progress_callback(current: int, total: int, item: str):
+            nonlocal last_file
+            last_file = item
+            if verbose:
+                console.print(f"  [dim]{item}[/dim]")
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+            transient=not verbose,
+        ) as progress:
+            task = progress.add_task("[cyan]Scanning codebase...", total=None)
+
+            stats = await engine.initialize(force_reindex=force)
+
+            progress.update(task, completed=True, description="[green]Complete")
+
+        # Show results
+        console.print()
+        console.print("[bold green]✓ Project indexed successfully![/bold green]")
+        console.print()
+        console.print(f"  [bold]Files:[/bold] {stats.total_files}")
+        console.print(f"  [bold]Chunks:[/bold] {stats.total_chunks}")
+
+        if stats.languages:
+            lang_str = ", ".join(
+                f"{lang}: {count}" for lang, count in sorted(stats.languages.items())
+            )
+            console.print(f"  [bold]Languages:[/bold] {lang_str}")
+
+        if stats.chunk_types:
+            type_str = ", ".join(
+                f"{ct}: {count}" for ct, count in sorted(stats.chunk_types.items())
+            )
+            console.print(f"  [bold]Chunk types:[/bold] {type_str}")
+
+        console.print()
+        console.print(
+            f"[dim]Data stored in: {project_path / '.perpetualcc'}[/dim]"
+        )
+
+    try:
+        asyncio.run(_index())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Indexing cancelled.[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error during indexing:[/red] {e}")
+        if verbose:
+            import traceback
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def logs(
+    session_id: str = typer.Argument(
+        ...,
+        help="Session ID from 'pcc list'",
+        metavar="SESSION",
+    ),
+    follow: bool = typer.Option(
+        False,
+        "--follow",
+        "-f",
+        help="Follow log output in real-time",
+    ),
+    lines: int = typer.Option(
+        50,
+        "--lines",
+        "-n",
+        help="Number of log lines to show",
+        metavar="N",
+    ),
+    level: str = typer.Option(
+        None,
+        "--level",
+        "-l",
+        help="Filter by log level: debug, info, warning, error",
+        metavar="LEVEL",
+    ),
+) -> None:
+    """
+    View logs for a session.
+
+    Shows the event history and decision log for a session.
+    Useful for debugging and understanding what Claude did.
+
+    [bold yellow]Examples:[/]
+
+      [dim]# View recent logs[/]
+      pcc logs a1b2c3d4
+
+      [dim]# Follow logs in real-time[/]
+      pcc logs a1b2c3d4 -f
+
+      [dim]# Show last 100 lines[/]
+      pcc logs a1b2c3d4 -n 100
+
+      [dim]# Filter by level[/]
+      pcc logs a1b2c3d4 -l error
+
+    [bold yellow]Log levels:[/]
+      debug    - Detailed debugging information
+      info     - General session events
+      warning  - Potential issues
+      error    - Errors and failures
+    """
+    manager = _get_session_manager()
+
+    # Find session by partial ID
+    session = None
+    for s in manager.list_sessions():
+        if s.id.startswith(session_id):
+            session = s
+            break
+
+    if not session:
+        console.print(f"[red]Error:[/red] Session not found: {session_id}")
+        raise typer.Exit(1)
+
+    async def _show_logs():
+        # Get log entries from the decision engine and checkpoint manager
+        from perpetualcc.core.decision_engine import DecisionEngine
+        from perpetualcc.core.checkpoint import CheckpointManager
+
+        decision_engine = DecisionEngine()
+        checkpoint_manager = CheckpointManager()
+
+        # Get decision history for this session
+        history = decision_engine.get_history(session_id=session.id, limit=lines)
+
+        if not history:
+            console.print("[dim]No logs found for this session.[/dim]")
+            console.print()
+            console.print("[dim]Logs are recorded when:[/dim]")
+            console.print("[dim]  - Permission decisions are made[/dim]")
+            console.print("[dim]  - Questions are answered[/dim]")
+            console.print("[dim]  - Checkpoints are created[/dim]")
+            return
+
+        # Display log entries
+        table = Table(
+            title=f"Session Logs: {session.id[:8]}",
+            show_lines=True,
+        )
+        table.add_column("Time", style="dim", no_wrap=True, width=12)
+        table.add_column("Level", no_wrap=True, width=8)
+        table.add_column("Tool/Action", style="cyan", width=15)
+        table.add_column("Decision", width=10)
+        table.add_column("Details", overflow="fold")
+
+        for entry in history:
+            # Format timestamp
+            timestamp = entry.timestamp.strftime("%H:%M:%S")
+
+            # Determine log level color
+            if entry.risk_level:
+                if entry.risk_level.value == "HIGH":
+                    level_display = "[red]HIGH[/red]"
+                elif entry.risk_level.value == "MEDIUM":
+                    level_display = "[yellow]MEDIUM[/yellow]"
+                else:
+                    level_display = "[green]LOW[/green]"
+            else:
+                level_display = "[dim]INFO[/dim]"
+
+            # Skip if level filter doesn't match
+            if level:
+                entry_level = entry.risk_level.value.lower() if entry.risk_level else "info"
+                if level.lower() not in entry_level:
+                    continue
+
+            # Format decision
+            if entry.approve:
+                decision_display = "[green]APPROVED[/green]"
+            elif entry.requires_human:
+                decision_display = "[yellow]ESCALATED[/yellow]"
+            else:
+                decision_display = "[red]DENIED[/red]"
+
+            # Format details
+            details = entry.reason or ""
+            if len(details) > 80:
+                details = details[:77] + "..."
+
+            table.add_row(
+                timestamp,
+                level_display,
+                entry.tool_name,
+                decision_display,
+                details,
+            )
+
+        console.print(table)
+
+        # Show checkpoint info
+        checkpoints = checkpoint_manager.list_checkpoints(session.id)
+        if checkpoints:
+            console.print()
+            console.print(f"[bold]Checkpoints:[/bold] {len(checkpoints)}")
+            for i, cp_file in enumerate(checkpoints[:5], 1):
+                cp_time = cp_file.stat().st_mtime
+                from datetime import datetime
+                cp_datetime = datetime.fromtimestamp(cp_time)
+                console.print(f"  {i}. {cp_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Follow mode
+        if follow:
+            console.print()
+            console.print("[dim]Following logs (Ctrl+C to stop)...[/dim]")
+            last_count = len(history)
+            while True:
+                await asyncio.sleep(2)
+                new_history = decision_engine.get_history(session_id=session.id)
+                if len(new_history) > last_count:
+                    for entry in new_history[last_count:]:
+                        timestamp = entry.timestamp.strftime("%H:%M:%S")
+                        tool = entry.tool_name
+                        status = "✓" if entry.approve else ("?" if entry.requires_human else "✗")
+                        console.print(f"[dim]{timestamp}[/dim] {status} {tool}: {entry.reason or ''}")
+                    last_count = len(new_history)
+
+    try:
+        asyncio.run(_show_logs())
+    except KeyboardInterrupt:
+        if follow:
+            console.print("\n[dim]Stopped following logs.[/dim]")
+
+
 @app.command()
 def version() -> None:
     """Show version number."""

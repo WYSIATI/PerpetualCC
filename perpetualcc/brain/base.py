@@ -25,6 +25,7 @@ class PermissionContext:
     session_id: str | None = None
     recent_tools: list[str] = field(default_factory=list)
     modified_files: list[str] = field(default_factory=list)
+    rag_context: list[dict[str, Any]] = field(default_factory=list)  # RAG results
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class QuestionContext:
     current_task: str | None = None
     session_id: str | None = None
     requirements_text: str | None = None
+    rag_context: list[dict[str, Any]] = field(default_factory=list)  # RAG results
 
 
 # Import PermissionDecision from decision engine to avoid circular imports
