@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PerpetualCC - Analytics</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <h1>🔄 PerpetualCC</h1>
+        </div>
+        <div class="nav-links">
+            <a href="/">Dashboard</a>
+            <a href="/analytics" class="active">Analytics</a>
+            <a href="/config">Config</a>
+        </div>
+        <div class="nav-actions">
+            <button id="theme-toggle" class="btn-icon" title="Toggle theme">🌓</button>
+        </div>
+    </nav>
+
+    <main class="container">
+        <header class="page-header">
+            <h2>📊 Session Analytics</h2>
+            <p>Track performance and metrics</p>
+        </header>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Total Sessions</h3>
+                <div class="stat-value">{{ stats.total_sessions }}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Completed</h3>
+                <div class="stat-value">{{ stats.completed_sessions }}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Success Rate</h3>
+                <div class="stat-value">{{ "%.1f" % stats.success_rate }}%</div>
+            </div>
+            <div class="stat-card">
+                <h3>Avg Duration</h3>
+                <div class="stat-value">{{ "%.0f" % (stats.avg_duration / 60) }}m</div>
+            </div>
+        </div>
+
+        <section class="section">
+            <h3>📈 Performance Charts</h3>
+            <div class="chart-container" id="performance-chart">
+                <p class="placeholder">Charts will be rendered here</p>
+            </div>
+        </section>
+
+        <section class="section">
+            <h3>📤 Exports</h3>
+            <div class="export-list" id="export-list">
+                <p class="placeholder">Loading exports...</p>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // Theme toggle
+        const themeToggle = document.getElementById('theme-toggle');
+        const body = document.body;
+        
+        // Load saved theme
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        body.setAttribute('data-theme', savedTheme);
+        
+        themeToggle.addEventListener('click', () => {
+            const currentTheme = body.getAttribute('data-theme');
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            body.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            
+            // Notify server
+            fetch(`/api/theme/${newTheme}`);
+        });
+
+        // Load exports
+        async function loadExports() {
+            try {
+                const response = await fetch('/api/exports');
+                const data = await response.json();
+                const list = document.getElementById('export-list');
+                
+                if (data.exports.length === 0) {
+                    list.innerHTML = '<p class="placeholder">No exports yet</p>';
+                    return;
+                }
+                
+                list.innerHTML = data.exports.map(exp => `
+                    <div class="export-item">
+                        <span class="filename">${exp.filename}</span>
+                        <span class="size">${(exp.size / 1024).toFixed(1)} KB</span>
+                        <span class="date">${new Date(exp.created).toLocaleDateString()}</span>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Failed to load exports:', err);
+            }
+        }
+
+        // Refresh every 10 seconds
+        loadExports();
+        setInterval(loadExports, 10000);
+    </script>
+</body>
+</html>
