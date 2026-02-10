@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Session Config - PerpetualCC</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #30363d;
+        }
+        .header h1 { color: #58a6ff; }
+        .form-group {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #8b949e;
+            font-size: 14px;
+        }
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-size: 14px;
+        }
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .checkbox-group input[type="checkbox"] {
+            width: auto;
+        }
+        .btn {
+            background: #238636;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        .btn:hover { background: #2ea043; }
+        .back-link {
+            color: #58a6ff;
+            text-decoration: none;
+            margin-bottom: 20px;
+            display: inline-block;
+        }
+        .back-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link">← Back to Dashboard</a>
+    
+    <div class="header">
+        <h1>⚙️ Session Configuration</h1>
+    </div>
+
+    <form hx-post="/config/save" hx-swap="none">
+        <div class="form-group">
+            <label for="brain">Brain Type</label>
+            <select name="brain" id="brain">
+                <option value="rule_based" {% if config.brain == 'rule_based' %}selected{% endif %}>Rule-Based (Default)</option>
+                <option value="gemini" {% if config.brain == 'gemini' %}selected{% endif %}>Gemini API</option>
+                <option value="ollama" {% if config.brain == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="risk_threshold">Risk Threshold</label>
+            <select name="risk_threshold" id="risk_threshold">
+                <option value="LOW" {% if config.risk_threshold == 'LOW' %}selected{% endif %}>Low (Auto-approve most)</option>
+                <option value="MEDIUM" {% if config.risk_threshold == 'MEDIUM' %}selected{% endif %}>Medium (Balanced)</option>
+                <option value="HIGH" {% if config.risk_threshold == 'HIGH' %}selected{% endif %}>High (Ask often)</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="max_iterations">Max Iterations</label>
+            <input type="number" name="max_iterations" id="max_iterations" value="{{ config.max_iterations }}" min="1" max="1000">
+        </div>
+
+        <div class="form-group">
+            <div class="checkbox-group">
+                <input type="checkbox" name="auto_approve" id="auto_approve" {% if config.auto_approve %}checked{% endif %}>
+                <label for="auto_approve">Auto-approve low-risk operations</label>
+            </div>
+        </div>
+
+        <button type="submit" class="btn">Save Configuration</button>
+    </form>
+
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+</body>
+</html>
