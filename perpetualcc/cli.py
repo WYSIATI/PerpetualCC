@@ -2154,6 +2154,44 @@ def logs(
 
 
 @app.command()
+def web(
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host to bind to"),
+    port: int = typer.Option(8080, "--port", "-p", help="Port to listen on"),
+) -> None:
+    """Launch the Web UI dashboard.
+
+    Opens a browser-based dashboard for managing sessions.
+    Alternative to the CLI for visual monitoring.
+
+    [bold yellow]Examples:[/]
+
+      [dim]# Start web UI on default port 8080[/]
+      pcc web
+
+      [dim]# Use custom port[/]
+      pcc web --port 3000
+
+      [dim]# Bind to specific interface[/]
+      pcc web --host 127.0.0.1 --port 5000
+    """
+    console.print(f"[bold green]Starting PerpetualCC Web UI...[/]")
+    console.print(f"[dim]Host:[/] {host}")
+    console.print(f"[dim]Port:[/] {port}")
+    console.print()
+    console.print(f"[cyan]Open http://{host}:{port} in your browser[/]")
+    console.print()
+
+    try:
+        from perpetualcc.ui.web.app import run_web_ui
+        run_web_ui(host=host, port=port)
+    except ImportError as e:
+        console.print(f"[red]Error:[/] Could not start web UI: {e}")
+        console.print("[dim]Make sure FastAPI is installed:[/]")
+        console.print("[dim]  pip install fastapi uvicorn jinja2[/]")
+        raise typer.Exit(1)
+
+
+@app.command()
 def version() -> None:
     """Show version number."""
     console.print(f"PerpetualCC v{__version__}")
