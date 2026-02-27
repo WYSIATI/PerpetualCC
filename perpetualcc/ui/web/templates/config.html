@@ -3,121 +3,438 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Session Config - PerpetualCC</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0d1117;
-            color: #c9d1d9;
-            padding: 20px;
-        }
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-            padding-bottom: 20px;
-            border-bottom: 1px solid #30363d;
-        }
-        .header h1 { color: #58a6ff; }
-        .form-group {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-        .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            color: #8b949e;
-            font-size: 14px;
-        }
-        .form-group input,
-        .form-group select {
-            width: 100%;
-            padding: 10px;
-            background: #0d1117;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            color: #c9d1d9;
-            font-size: 14px;
-        }
-        .form-group input:focus,
-        .form-group select:focus {
-            outline: none;
-            border-color: #58a6ff;
-        }
-        .checkbox-group {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .checkbox-group input[type="checkbox"] {
-            width: auto;
-        }
-        .btn {
-            background: #238636;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: bold;
-        }
-        .btn:hover { background: #2ea043; }
-        .back-link {
-            color: #58a6ff;
-            text-decoration: none;
-            margin-bottom: 20px;
-            display: inline-block;
-        }
-        .back-link:hover { text-decoration: underline; }
-    </style>
+    <meta name="description" content="PerpetualCC Configuration - Configure session settings and behavior">
+    <title>Configuration - PerpetualCC</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
 </head>
 <body>
-    <a href="/" class="back-link">← Back to Dashboard</a>
-    
-    <div class="header">
-        <h1>⚙️ Session Configuration</h1>
-    </div>
+    <!-- Skip to main content link for accessibility -->
+    <a href="#main-content" class="skip-link">Skip to main content</a>
 
-    <form hx-post="/config/save" hx-swap="none">
-        <div class="form-group">
-            <label for="brain">Brain Type</label>
-            <select name="brain" id="brain">
-                <option value="rule_based" {% if config.brain == 'rule_based' %}selected{% endif %}>Rule-Based (Default)</option>
-                <option value="gemini" {% if config.brain == 'gemini' %}selected{% endif %}>Gemini API</option>
-                <option value="ollama" {% if config.brain == 'ollama' %}selected{% endif %}>Ollama (Local)</option>
-            </select>
+    <!-- Navigation -->
+    <nav class="navbar" role="navigation" aria-label="Main navigation">
+        <div class="nav-brand">
+            <h1>PerpetualCC</h1>
         </div>
 
-        <div class="form-group">
-            <label for="risk_threshold">Risk Threshold</label>
-            <select name="risk_threshold" id="risk_threshold">
-                <option value="LOW" {% if config.risk_threshold == 'LOW' %}selected{% endif %}>Low (Auto-approve most)</option>
-                <option value="MEDIUM" {% if config.risk_threshold == 'MEDIUM' %}selected{% endif %}>Medium (Balanced)</option>
-                <option value="HIGH" {% if config.risk_threshold == 'HIGH' %}selected{% endif %}>High (Ask often)</option>
-            </select>
+        <!-- Mobile menu toggle -->
+        <button
+            class="nav-toggle"
+            aria-label="Toggle navigation menu"
+            aria-expanded="false"
+            aria-controls="nav-links"
+        >
+            <span></span>
+            <span></span>
+            <span></span>
+        </button>
+
+        <div class="nav-links" id="nav-links" role="menubar">
+            <a href="/" role="menuitem">Dashboard</a>
+            <a href="/analytics" role="menuitem">Analytics</a>
+            <a href="/config" class="active" role="menuitem" aria-current="page">Config</a>
         </div>
 
-        <div class="form-group">
-            <label for="max_iterations">Max Iterations</label>
-            <input type="number" name="max_iterations" id="max_iterations" value="{{ config.max_iterations }}" min="1" max="1000">
+        <div class="nav-actions">
+            <button
+                id="theme-toggle"
+                class="btn-icon"
+                aria-label="Toggle dark/light theme"
+                title="Toggle theme"
+            >
+                <span aria-hidden="true">&#9789;</span>
+            </button>
         </div>
+    </nav>
 
-        <div class="form-group">
-            <div class="checkbox-group">
-                <input type="checkbox" name="auto_approve" id="auto_approve" {% if config.auto_approve %}checked{% endif %}>
-                <label for="auto_approve">Auto-approve low-risk operations</label>
+    <!-- Toast notification container -->
+    <div class="toast-container" id="toast-container" role="alert" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Main content -->
+    <main id="main-content" class="container" role="main">
+        <!-- Breadcrumb navigation -->
+        <nav aria-label="Breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item">
+                    <a href="/">
+                        <span class="breadcrumb-icon" aria-hidden="true">&#8962;</span>
+                        Dashboard
+                    </a>
+                </li>
+                <li class="breadcrumb-item active" aria-current="page">
+                    Configuration
+                </li>
+            </ol>
+        </nav>
+
+        <!-- Page header -->
+        <header class="page-header">
+            <h2>Session Configuration</h2>
+            <p>Customize how PerpetualCC sessions behave and interact with your codebase</p>
+        </header>
+
+        <!-- Configuration form -->
+        <form
+            id="config-form"
+            hx-post="/config/save"
+            hx-swap="none"
+            hx-indicator="#save-config-btn"
+            aria-label="Session configuration form"
+        >
+            <!-- Brain Type Section -->
+            <section class="section" aria-labelledby="brain-section-title">
+                <h3 id="brain-section-title">AI Brain Configuration</h3>
+
+                <div class="form-group">
+                    <label for="brain" class="form-label">Brain Type</label>
+                    <select
+                        name="brain"
+                        id="brain"
+                        class="form-select"
+                        aria-describedby="brain-help"
+                    >
+                        <option value="rule_based" {% if config.brain == 'rule_based' %}selected{% endif %}>
+                            Rule-Based (Default)
+                        </option>
+                        <option value="gemini" {% if config.brain == 'gemini' %}selected{% endif %}>
+                            Gemini API
+                        </option>
+                        <option value="ollama" {% if config.brain == 'ollama' %}selected{% endif %}>
+                            Ollama (Local)
+                        </option>
+                    </select>
+                    <span id="brain-help" class="form-help">
+                        Choose the AI model that powers decision-making. Rule-Based is fastest and requires no API keys.
+                        Gemini uses Google's API (requires GEMINI_API_KEY). Ollama runs locally on your machine.
+                    </span>
+                </div>
+            </section>
+
+            <!-- Safety & Risk Section -->
+            <section class="section" aria-labelledby="safety-section-title">
+                <h3 id="safety-section-title">Safety & Risk Settings</h3>
+
+                <div class="form-group">
+                    <label for="risk_threshold" class="form-label">Risk Threshold</label>
+                    <select
+                        name="risk_threshold"
+                        id="risk_threshold"
+                        class="form-select"
+                        aria-describedby="risk-help"
+                    >
+                        <option value="LOW" {% if config.risk_threshold == 'LOW' %}selected{% endif %}>
+                            Low - Auto-approve most operations
+                        </option>
+                        <option value="MEDIUM" {% if config.risk_threshold == 'MEDIUM' %}selected{% endif %}>
+                            Medium - Balanced (Recommended)
+                        </option>
+                        <option value="HIGH" {% if config.risk_threshold == 'HIGH' %}selected{% endif %}>
+                            High - Ask for approval frequently
+                        </option>
+                    </select>
+                    <span id="risk-help" class="form-help">
+                        Controls how often you're asked to approve operations. Lower thresholds mean more autonomy
+                        but less control. Higher thresholds provide more safety checkpoints but require more interaction.
+                    </span>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-check">
+                        <input
+                            type="checkbox"
+                            name="auto_approve"
+                            id="auto_approve"
+                            class="form-check-input"
+                            {% if config.auto_approve %}checked{% endif %}
+                            aria-describedby="auto-approve-help"
+                        >
+                        <span>Auto-approve low-risk operations</span>
+                    </label>
+                    <span id="auto-approve-help" class="form-help">
+                        When enabled, operations deemed low-risk (like reading files, running tests) will be
+                        automatically approved without prompting. Disable for maximum control over all actions.
+                    </span>
+                </div>
+            </section>
+
+            <!-- Execution Limits Section -->
+            <section class="section" aria-labelledby="limits-section-title">
+                <h3 id="limits-section-title">Execution Limits</h3>
+
+                <div class="form-group">
+                    <label for="max_iterations" class="form-label">Maximum Iterations</label>
+                    <input
+                        type="number"
+                        name="max_iterations"
+                        id="max_iterations"
+                        class="form-input"
+                        value="{{ config.max_iterations }}"
+                        min="1"
+                        max="1000"
+                        required
+                        aria-describedby="iterations-help"
+                    >
+                    <span id="iterations-help" class="form-help">
+                        The maximum number of action loops before a session automatically pauses. This prevents
+                        runaway sessions. Recommended range: 10-100 for most tasks. Set higher for complex projects.
+                    </span>
+                    <span class="form-error" id="iterations-error" style="display: none;">
+                        Please enter a value between 1 and 1000.
+                    </span>
+                </div>
+
+                <div class="form-group">
+                    <label for="timeout" class="form-label">Session Timeout (minutes)</label>
+                    <input
+                        type="number"
+                        name="timeout"
+                        id="timeout"
+                        class="form-input"
+                        value="{{ config.timeout if config.timeout else 60 }}"
+                        min="1"
+                        max="1440"
+                        aria-describedby="timeout-help"
+                    >
+                    <span id="timeout-help" class="form-help">
+                        Maximum time a session can run before automatically stopping. Helps prevent forgotten sessions
+                        from running indefinitely. Set to 0 for no timeout (not recommended).
+                    </span>
+                </div>
+            </section>
+
+            <!-- Advanced Settings Section -->
+            <section class="section" aria-labelledby="advanced-section-title">
+                <h3 id="advanced-section-title">Advanced Settings</h3>
+
+                <div class="form-group">
+                    <label for="log_level" class="form-label">Log Level</label>
+                    <select
+                        name="log_level"
+                        id="log_level"
+                        class="form-select"
+                        aria-describedby="log-level-help"
+                    >
+                        <option value="DEBUG" {% if config.log_level == 'DEBUG' %}selected{% endif %}>
+                            Debug - Verbose output
+                        </option>
+                        <option value="INFO" {% if config.log_level == 'INFO' or not config.log_level %}selected{% endif %}>
+                            Info - Standard (Default)
+                        </option>
+                        <option value="WARNING" {% if config.log_level == 'WARNING' %}selected{% endif %}>
+                            Warning - Minimal output
+                        </option>
+                        <option value="ERROR" {% if config.log_level == 'ERROR' %}selected{% endif %}>
+                            Error - Errors only
+                        </option>
+                    </select>
+                    <span id="log-level-help" class="form-help">
+                        Controls the verbosity of session logs. Debug mode is helpful for troubleshooting.
+                        Warning or Error modes reduce noise but may hide useful information.
+                    </span>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-check">
+                        <input
+                            type="checkbox"
+                            name="dry_run"
+                            id="dry_run"
+                            class="form-check-input"
+                            {% if config.dry_run %}checked{% endif %}
+                            aria-describedby="dry-run-help"
+                        >
+                        <span>Dry Run Mode</span>
+                    </label>
+                    <span id="dry-run-help" class="form-help">
+                        When enabled, sessions will simulate actions without actually executing them. Useful for
+                        testing configuration or understanding what the AI would do without making changes.
+                    </span>
+                </div>
+            </section>
+
+            <!-- Form actions -->
+            <div class="form-actions">
+                <button
+                    type="submit"
+                    class="btn btn-success"
+                    id="save-config-btn"
+                >
+                    <span class="htmx-indicator">
+                        <span class="htmx-indicator-spinner" aria-hidden="true"></span>
+                    </span>
+                    <span>Save Configuration</span>
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-secondary"
+                    onclick="resetForm()"
+                >
+                    Reset to Defaults
+                </button>
             </div>
-        </div>
+        </form>
+    </main>
 
-        <button type="submit" class="btn">Save Configuration</button>
-    </form>
+    <script>
+        // ===== Theme Toggle =====
+        const themeToggle = document.getElementById('theme-toggle');
+        const body = document.body;
 
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+        // Load saved theme preference
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        body.setAttribute('data-theme', savedTheme);
+        updateThemeIcon(savedTheme);
+
+        themeToggle.addEventListener('click', () => {
+            const currentTheme = body.getAttribute('data-theme');
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            body.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            updateThemeIcon(newTheme);
+
+            // Notify server about theme change
+            fetch(`/api/theme/${newTheme}`, { method: 'POST' }).catch(() => {});
+        });
+
+        function updateThemeIcon(theme) {
+            const icon = themeToggle.querySelector('span');
+            icon.textContent = theme === 'dark' ? '\u263D' : '\u2600'; // Moon/Sun
+            themeToggle.setAttribute('aria-label',
+                theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'
+            );
+        }
+
+        // ===== Mobile Navigation =====
+        const navToggle = document.querySelector('.nav-toggle');
+        const navLinks = document.querySelector('.nav-links');
+
+        navToggle.addEventListener('click', () => {
+            const isExpanded = navToggle.getAttribute('aria-expanded') === 'true';
+            navToggle.setAttribute('aria-expanded', !isExpanded);
+            navLinks.classList.toggle('active');
+        });
+
+        // ===== Toast Notification System =====
+        function showToast(type, title, message, duration = 5000) {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.setAttribute('role', 'alert');
+
+            const icons = {
+                success: '\u2713', // Checkmark
+                error: '\u2717',   // X mark
+                warning: '\u26A0', // Warning
+                info: '\u2139'    // Info
+            };
+
+            toast.innerHTML = `
+                <span class="toast-icon" aria-hidden="true">${icons[type] || icons.info}</span>
+                <div class="toast-content">
+                    <div class="toast-title">${title}</div>
+                    ${message ? `<div class="toast-message">${message}</div>` : ''}
+                </div>
+                <button class="toast-close" aria-label="Dismiss notification">&times;</button>
+            `;
+
+            container.appendChild(toast);
+
+            // Close button handler
+            toast.querySelector('.toast-close').addEventListener('click', () => dismissToast(toast));
+
+            // Auto-dismiss after duration
+            if (duration > 0) {
+                setTimeout(() => dismissToast(toast), duration);
+            }
+        }
+
+        function dismissToast(toast) {
+            toast.classList.add('toast-dismissing');
+            setTimeout(() => toast.remove(), 300);
+        }
+
+        // ===== Form Validation =====
+        const maxIterationsInput = document.getElementById('max_iterations');
+        const iterationsError = document.getElementById('iterations-error');
+
+        maxIterationsInput.addEventListener('input', (e) => {
+            const value = parseInt(e.target.value, 10);
+            const isValid = !isNaN(value) && value >= 1 && value <= 1000;
+
+            if (!isValid && e.target.value !== '') {
+                e.target.classList.add('is-invalid');
+                iterationsError.style.display = 'block';
+            } else {
+                e.target.classList.remove('is-invalid');
+                iterationsError.style.display = 'none';
+            }
+        });
+
+        // ===== Form Reset =====
+        function resetForm() {
+            if (confirm('Are you sure you want to reset all settings to their default values?')) {
+                // Set default values
+                document.getElementById('brain').value = 'rule_based';
+                document.getElementById('risk_threshold').value = 'MEDIUM';
+                document.getElementById('max_iterations').value = '100';
+                document.getElementById('timeout').value = '60';
+                document.getElementById('log_level').value = 'INFO';
+                document.getElementById('auto_approve').checked = true;
+                document.getElementById('dry_run').checked = false;
+
+                // Clear validation states
+                document.querySelectorAll('.is-invalid').forEach(el => {
+                    el.classList.remove('is-invalid');
+                });
+                iterationsError.style.display = 'none';
+
+                showToast('info', 'Form Reset', 'Settings have been reset to defaults. Click Save to apply.');
+            }
+        }
+
+        // ===== HTMX Event Handlers =====
+        document.body.addEventListener('htmx:afterRequest', (event) => {
+            const xhr = event.detail.xhr;
+
+            if (event.detail.requestConfig.path === '/config/save') {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    showToast('success', 'Configuration Saved', 'Your settings have been saved successfully.');
+                }
+            }
+        });
+
+        document.body.addEventListener('htmx:responseError', (event) => {
+            const xhr = event.detail.xhr;
+            let message = 'Failed to save configuration.';
+
+            try {
+                const response = JSON.parse(xhr.responseText);
+                message = response.error || response.message || message;
+            } catch (e) {
+                // Use default message
+            }
+
+            showToast('error', 'Save Failed', message);
+        });
+
+        document.body.addEventListener('htmx:sendError', () => {
+            showToast('error', 'Connection Error', 'Unable to connect to the server. Please check your connection.');
+        });
+
+        // ===== Form Validation on Submit =====
+        document.getElementById('config-form').addEventListener('htmx:validate', (event) => {
+            const form = event.target;
+            const maxIterations = parseInt(form.max_iterations.value, 10);
+
+            if (isNaN(maxIterations) || maxIterations < 1 || maxIterations > 1000) {
+                event.preventDefault();
+                maxIterationsInput.classList.add('is-invalid');
+                iterationsError.style.display = 'block';
+                maxIterationsInput.focus();
+                showToast('warning', 'Validation Error', 'Please fix the form errors before saving.');
+            }
+        });
+    </script>
 </body>
 </html>
