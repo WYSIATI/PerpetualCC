@@ -11,47 +11,50 @@ from perpetualcc.ui.web.analytics import SessionAnalytics
 
 class TestSessionAnalytics:
     """Test suite for SessionAnalytics."""
-    
+
     def setup_method(self):
         """Set up test fixtures."""
         self.analytics = SessionAnalytics()
         self.session_id = "test-session-001"
         self.config = {"brain": "kimi", "risk": "high"}
-    
+
     def test_record_session_start(self):
         """Test recording session start."""
         self.analytics.record_session_start(self.session_id, self.config)
-        
-        assert self.session_id in self.analytics.metrics
-        assert self.analytics.metrics[self.session_id]["config"] == self.config
-        assert "start_time" in self.analytics.metrics[self.session_id]
-        assert self.analytics.metrics[self.session_id]["status"] == "running"
-    
+
+        # Use get_session_stats to verify data was recorded (respects encapsulation)
+        stats = self.analytics.get_session_stats(self.session_id)
+        assert stats["session_id"] == self.session_id
+        assert stats["status"] == "running"
+        assert "start_time" in stats
+
     def test_record_event(self):
         """Test recording events."""
         self.analytics.record_session_start(self.session_id, self.config)
-        self.analytics.record_event(self.session_id, "log", {"message": "test"})
-        
-        events = self.analytics.metrics[self.session_id]["events"]
-        assert len(events) == 1
-        assert events[0]["type"] == "log"
-        assert events[0]["data"]["message"] == "test"
-    
+        # Use valid event type "info" instead of "log"
+        result = self.analytics.record_event(self.session_id, "info", {"message": "test"})
+
+        assert result is True
+        stats = self.analytics.get_session_stats(self.session_id)
+        assert stats["event_count"] == 1
+        assert stats["event_breakdown"]["info"] == 1
+
     def test_record_session_end(self):
         """Test recording session end."""
         self.analytics.record_session_start(self.session_id, self.config)
-        
+
         # Simulate time passing
         import time
         time.sleep(0.1)
-        
-        self.analytics.record_session_end(self.session_id, "completed")
-        
-        metric = self.analytics.metrics[self.session_id]
-        assert metric["status"] == "completed"
-        assert "end_time" in metric
-        assert "duration_seconds" in metric
-        assert metric["duration_seconds"] > 0
+
+        result = self.analytics.record_session_end(self.session_id, "completed")
+
+        assert result is True
+        stats = self.analytics.get_session_stats(self.session_id)
+        assert stats["status"] == "completed"
+        assert "end_time" in stats
+        assert "duration_seconds" in stats
+        assert stats["duration_seconds"] > 0
     
     def test_get_session_stats(self):
         """Test getting session statistics."""
@@ -99,13 +102,14 @@ class TestSessionAnalytics:
     def test_event_breakdown(self):
         """Test event breakdown in stats."""
         self.analytics.record_session_start(self.session_id, self.config)
-        self.analytics.record_event(self.session_id, "log", {})
-        self.analytics.record_event(self.session_id, "log", {})
+        # Use valid event types
+        self.analytics.record_event(self.session_id, "info", {})
+        self.analytics.record_event(self.session_id, "info", {})
         self.analytics.record_event(self.session_id, "error", {})
-        
+
         stats = self.analytics.get_session_stats(self.session_id)
-        
-        assert stats["event_breakdown"]["log"] == 2
+
+        assert stats["event_breakdown"]["info"] == 2
         assert stats["event_breakdown"]["error"] == 1
 
 
