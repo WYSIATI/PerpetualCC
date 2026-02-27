@@ -354,6 +354,38 @@ deactivate
 rm -rf /tmp/verify-pcc
 ```
 
+### Step 4: Test Installation with pipx
+
+Pipx is the recommended installation method for end users. Verify it works:
+
+```bash
+# Ensure pipx is installed
+pipx --version || python -m pip install --user pipx
+
+# Install from PyPI with pipx
+pipx install perpetualcc
+
+# Verify the pcc command is available globally
+pcc --version
+# Expected: perpetualcc vX.Y.Z
+
+pcc --help
+# Expected: Full help output with all commands
+
+# Test with optional dependencies
+pipx uninstall perpetualcc
+pipx install 'perpetualcc[gemini]'
+pcc --version
+
+# Test with all dependencies
+pipx uninstall perpetualcc
+pipx install 'perpetualcc[all]'
+pcc --version
+
+# Cleanup
+pipx uninstall perpetualcc
+```
+
 ---
 
 ## Creating GitHub Release
@@ -433,16 +465,21 @@ gh release view vX.Y.Z --json assets
 pip index versions perpetualcc
 # Expected: Shows X.Y.Z in list
 
-# 2. Fresh install works
+# 2. Fresh install works (pip)
 pip install perpetualcc==X.Y.Z
 pcc --version
 # Expected: vX.Y.Z
 
-# 3. GitHub release accessible
+# 3. Fresh install works (pipx - recommended for end users)
+pipx install perpetualcc
+pcc --version
+# Expected: vX.Y.Z (pcc command available globally without venv)
+
+# 4. GitHub release accessible
 gh release view vX.Y.Z
 # Expected: Shows release details
 
-# 4. Git tag exists
+# 5. Git tag exists
 git ls-remote --tags origin | grep vX.Y.Z
 # Expected: Shows tag reference
 ```

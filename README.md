@@ -41,6 +41,38 @@ You stay focused on high-level decisions while PerpetualCC handles the routine i
 
 ## Installation
 
+### Install with pipx (Recommended)
+
+The easiest way to install PerpetualCC is with [pipx](https://pipx.pypa.io/), which installs the `pcc` command globally in an isolated environment:
+
+```bash
+# Install pipx if you don't have it
+brew install pipx  # macOS
+# or: python -m pip install --user pipx
+
+# Install PerpetualCC
+pipx install perpetualcc
+
+# Verify installation
+pcc --version
+
+# Install with optional features (e.g., Gemini brain)
+pipx install 'perpetualcc[gemini]'
+
+# Install with all features
+pipx install 'perpetualcc[all]'
+```
+
+### Install with pip
+
+```bash
+# Install from PyPI
+pip install perpetualcc
+
+# Or install with optional features
+pip install 'perpetualcc[all]'
+```
+
 ### From Source (Development)
 
 ```bash

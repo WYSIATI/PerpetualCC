@@ -119,10 +119,17 @@ Version must be updated in these files:
 
 **User Installation**:
 ```bash
-pip install perpetualcc
-# or
+# Recommended: Install with pipx (global command, isolated environment)
 pipx install perpetualcc
+
+# Or with pip (requires virtual environment)
+pip install perpetualcc
+
+# Install with optional features
+pipx install 'perpetualcc[all]'
 ```
+
+> **Why pipx?** Pipx installs the `pcc` command globally while keeping dependencies isolated. Users can run `pcc` from any directory without activating a virtual environment.
 
 **Requirements**:
 - [ ] All unit tests passing
